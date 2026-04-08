@@ -24,7 +24,12 @@
 #   - 홈 디렉터리 30GB+ 여유 공간
 # =============================================================================
 
-set -euo pipefail
+# NOTE: set -u (nounset)는 의도적으로 사용하지 않습니다.
+# ROS2의 /opt/ros/humble/setup.bash는 내부에서 AMENT_TRACE_SETUP_FILES 등의
+# 변수를 default 없이 참조하기 때문에, set -u 상태에서 source하면 즉시 종료됩니다.
+# (ERR trap도 parameter expansion error는 잡지 못함)
+# set -e와 pipefail만으로 충분히 안전하게 동작합니다.
+set -eo pipefail
 
 # ---------- 색상 출력 ----------
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; BLU='\033[0;34m'; NC='\033[0m'
