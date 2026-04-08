@@ -1,0 +1,51 @@
+# =============================================================================
+# Interceptor Drone — gitignore
+# =============================================================================
+
+# ---------- ROS2 빌드 산출물 ----------
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# ---------- vcstool로 가져오는 외부 저장소 ----------
+# (각자 setup_dev_env.sh가 다시 가져오므로 git에 포함하지 않음)
+ros2_ws/src/px4_msgs/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+.venv/
+venv/
+env/
+
+# ---------- IDE / 에디터 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+
+# ---------- 시뮬레이션 / 비행 로그 ----------
+# rosbag, PX4 ulog 등은 용량이 크므로 git이 아닌 외부 저장소(예: cloud) 권장
+*.bag
+*.db3
+*.mcap
+*.ulg
+logs/
+rosbags/
+
+# ---------- 임시 빌드 캐시 (루트 경로) ----------
+build/
+install/
+log/
+
+# ---------- 환경 파일 ----------
+.env
+.env.local
