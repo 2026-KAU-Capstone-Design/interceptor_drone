@@ -27,7 +27,7 @@
 깨끗한 Ubuntu 22.04.5 LTS에서 다음 세 줄이면 끝납니다.
 
 ```bash
-git clone <repo-url> ~/Documents/interceptor_drone
+git clone https://github.com/2026-KAU-Capstone-Design/interceptor_drone.git ~/Documents/interceptor_drone
 cd ~/Documents/interceptor_drone
 bash scripts/setup_dev_env.sh
 ```
