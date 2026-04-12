@@ -1,0 +1,24 @@
+# =============================================================================
+# Interceptor Control — Mission Parameters
+# =============================================================================
+# ros2 run interceptor_control offboard_hover --ros-args --params-file config/mission_params.yaml
+# =============================================================================
+
+offboard_hover:
+  ros__parameters:
+    # ── 비행 설정 ──
+    target_altitude: -5.0       # NED z (음수 = 위), 단위: m
+    hover_duration: 30.0        # 호버 유지 시간, 단위: s
+    position_threshold: 0.5     # 위치 도달 판정 거리, 단위: m
+
+    # ── 풍속 안전 기준 ──
+    # 0~8 m/s  : 정상 운용
+    # 8~15 m/s : 강풍 — 경고 후 판단
+    # 15+ m/s  : 위험 — 즉시 RTL
+    wind_speed_warn: 8.0        # 풍속 경고 기준, 단위: m/s
+    wind_speed_critical: 15.0   # 강풍 RTL 기준, 단위: m/s
+
+    # ── 자세 안전 기준 ──
+    tilt_threshold_deg: 30.0        # 기울기 교란 감지 기준, 단위: degree
+    attitude_recovery_timeout: 2.0  # 기울기 복원 제한 시간, 단위: s
+                                    # 초과 시 비상 착륙
