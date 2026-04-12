@@ -49,3 +49,8 @@ log/
 # ---------- 환경 파일 ----------
 .env
 .env.local
+
+# YOLOv8
+yolov8n.pt
+*.onnx
+runs/

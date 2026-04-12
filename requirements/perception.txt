@@ -1,0 +1,20 @@
+# =============================================================================
+# Interceptor Drone — Perception Dependencies (YOLOv8n)
+# =============================================================================
+# PyTorch는 GPU에 따라 설치 URL이 다르므로 이 파일에 포함하지 않음.
+# scripts/setup_perception.sh 가 자동으로 적절한 PyTorch 버전을 설치합니다.
+#
+# 이 파일은 참고용이며, 직접 pip install -r 로 사용하지 않고
+# setup_perception.sh를 통해 설치하는 것을 권장합니다.
+# =============================================================================
+
+# Ultralytics YOLOv8 — 모델 로딩, 추론, 학습 통합 프레임워크
+ultralytics>=8.2.0
+
+# 아래는 ultralytics가 자동 설치하는 주요 의존성 (참고용):
+# - torch, torchvision    (setup_perception.sh가 GPU/CPU 맞춤 설치)
+# - opencv-python         (이미지 처리)
+# - numpy                 (수치 연산)
+# - pillow                (이미지 I/O)
+# - scipy                 (후처리)
+# - matplotlib            (시각화, 선택사항)
