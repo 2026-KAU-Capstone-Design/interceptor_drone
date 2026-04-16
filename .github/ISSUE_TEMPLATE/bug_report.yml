@@ -94,9 +94,9 @@ body:
     attributes:
       label: 확인 사항
       options:
-        - label: docs/tutorial_offboard.md 의 "자주 하는 실수" 섹션을 확인했다
+        - label: "docs/tutorial_offboard.md 의 '자주 하는 실수' 섹션을 확인했다"
           required: true
-        - label: `pkill -9 gz; pkill -9 ruby; pkill -9 px4` 후 재실행해봤다
+        - label: "`pkill -9 gz; pkill -9 ruby; pkill -9 px4` 후 재실행해봤다"
           required: false
-        - label: `ros2_ws/` 에서 colcon build 를 다시 해봤다
+        - label: "`ros2_ws/` 에서 colcon build 를 다시 해봤다"
           required: false
