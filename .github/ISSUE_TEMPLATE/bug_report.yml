@@ -1,0 +1,102 @@
+name: 🐛 Bug Report
+description: 버그 또는 비정상 동작 보고
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 버그 리포트
+        발견한 문제를 팀원이 재현하고 고칠 수 있도록 상세히 기재해주세요.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 영역
+      options:
+        - setup script (setup_dev_env.sh / setup_perception.sh)
+        - ROS2 노드 (interceptor_control / interceptor_perception / 기타)
+        - Gazebo world / simulation
+        - PX4 / SITL
+        - Micro XRCE-DDS Agent / 브리지
+        - 문서
+        - 기타
+    validations:
+      required: true
+
+  - type: input
+    id: affected_file
+    attributes:
+      label: 파일 경로 (알고 있다면)
+      placeholder: ros2_ws/src/interceptor_control/interceptor_control/offboard_hover.py:150
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 버그 설명
+      description: 무슨 일이 일어났나? 한 문장으로 요약하고 상세 설명.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 재현 절차
+      placeholder: |
+        1. T1 `MicroXRCEAgent udp4 -p 8888` 실행
+        2. T2 `make px4_sitl gz_x500` 실행
+        3. T3 `ros2 run interceptor_control offboard_hover` 실행
+        4. 드론이 호버 상태에서 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 실제 동작
+      description: 에러 메시지, 스택 트레이스는 코드블록(```)으로 감싸주세요.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 환경
+      description: "`bash scripts/verify_env.sh` 출력을 붙여넣으세요."
+      placeholder: |
+        OS: Ubuntu 22.04.5 LTS
+        ROS_DISTRO: humble
+        PX4 git tag: v1.16.1
+        GPU: NVIDIA GeForce MX450 / AMD / Intel iGPU / ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그 / 스크린샷
+      description: 관련 rosbag, PX4 ulog, Gazebo 콘솔 출력 첨부
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 확인 사항
+      options:
+        - label: docs/tutorial_offboard.md 의 "자주 하는 실수" 섹션을 확인했다
+          required: true
+        - label: `pkill -9 gz; pkill -9 ruby; pkill -9 px4` 후 재실행해봤다
+          required: false
+        - label: `ros2_ws/` 에서 colcon build 를 다시 해봤다
+          required: false
