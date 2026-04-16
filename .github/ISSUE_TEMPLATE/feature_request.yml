@@ -1,0 +1,114 @@
+name: ✨ Feature Request
+description: 새 기능 추가 (perception, planning, control, simulation, infra 등)
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 기능 추가 이슈
+        새로운 ROS2 노드, 알고리즘, 시뮬레이션 환경, 인프라 개선 등 기능 단위의 작업 이슈입니다.
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 카테고리
+      description: 어느 영역의 기능인가요?
+      options:
+        - control — Offboard 제어, 비행 모드 전환, 안전 로직
+        - perception — YOLO, 카메라, 표적 검출
+        - planning — 요격 경로, 회피, 미션 시퀀싱
+        - simulation — Gazebo 월드, 모델, 물리 설정
+        - infra — 셋업 스크립트, CI, 빌드, 문서
+        - msgs — 커스텀 메시지/서비스
+        - deployment — Jetson Orin Nano 이식, TensorRT, 실기체 통신
+        - etc
+    validations:
+      required: true
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: 캡스톤 Phase
+      description: 로드맵 상 어느 단계?
+      options:
+        - Phase 0 — 환경 셋업
+        - Phase 1 — ROS2/PX4 기초 학습
+        - Phase 2 — 기본 SITL 비행 (Offboard, waypoint)
+        - Phase 3 — 표적 인식 (YOLO, ArUco)
+        - Phase 4 — 요격 알고리즘
+        - Phase 5 — HW 스펙 인수 후 시뮬 적합화
+        - Phase 6 — 실기체 이식 (Pixhawk + Jetson Orin Nano)
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 문제 정의 / 동기
+      description: 왜 이 기능이 필요한가? 지금은 어떻게 되어있고, 무엇이 부족한가?
+      placeholder: |
+        예
+        현재 offboard_hover.py는 고정 waypoint만 지원하는데, 표적 추적을 위해서는
+        /target/position 토픽을 구독해서 실시간으로 setpoint를 갱신해야 함.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: 제안 구현
+      description: 어떻게 만들 것인가? 설계 개요.
+      placeholder: |
+        예
+        - interceptor_planning 패키지 신규 생성
+        - target_follower.py 노드: /target/position 구독 → PN 알고리즘 → setpoint 발행
+        - ROS2 parameter로 추적 게인 조정 가능하게
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected_files
+    attributes:
+      label: 영향 받는 파일/패키지
+      description: 수정/신규 생성될 파일 목록
+      placeholder: |
+        - `ros2_ws/src/interceptor_planning/` (신규)
+        - `ros2_ws/src/interceptor_control/offboard_hover.py` (수정)
+        - `docs/architecture.md` (갱신)
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria (완료 기준)
+      placeholder: |
+        - [ ] SITL에서 표적 모델 추적 시연 가능
+        - [ ] /target/position 구독 → 1Hz 이상으로 setpoint 갱신
+        - [ ] 단위 테스트 작성 (최소 1개)
+        - [ ] docs/architecture.md 업데이트
+        - [ ] PR 리뷰 승인
+    validations:
+      required: true
+
+  - type: dropdown
+    id: effort
+    attributes:
+      label: 예상 난이도/공수
+      options:
+        - S — 반나절 이내 (~4h)
+        - M — 1~2일
+        - L — 3~5일
+        - XL — 1주 이상 (서브 이슈로 쪼갤 것)
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 선행 조건 / 연관 이슈
+      description: 먼저 처리되어야 할 이슈, 연관된 이슈 번호
+      placeholder: "#5, #12"
+    validations:
+      required: false

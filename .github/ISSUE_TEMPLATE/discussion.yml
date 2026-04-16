@@ -1,0 +1,53 @@
+name: 💬 Discussion / Question
+description: 설계 결정, 기술 선택, 질문 등 논의가 필요한 이슈
+title: "[Discuss] "
+labels: ["discussion"]
+body:
+  - type: dropdown
+    id: topic
+    attributes:
+      label: 주제
+      options:
+        - 아키텍처/설계 결정
+        - 기술 선택 (라이브러리, 알고리즘)
+        - 팀 워크플로 / 프로세스
+        - 질문 (How to ...)
+        - 회의 안건 제안
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 배경
+      description: 지금까지의 상황과 고려한 내용
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 논의 포인트
+      description: 결정하거나 답해야 할 질문
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: 후보안 / 옵션
+      placeholder: |
+        A. ...
+        B. ...
+        C. ...
+      render: markdown
+    validations:
+      required: false
+
+  - type: input
+    id: deadline
+    attributes:
+      label: 결정 필요 시점
+      placeholder: 2026-04-18 (다음 회의 전까지)
+    validations:
+      required: false

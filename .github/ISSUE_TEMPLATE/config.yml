@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 프로젝트 문서
+    url: https://github.com/2026-KAU-Capstone-Design/interceptor_drone/tree/main/docs
+    about: 이슈를 올리기 전에 docs/ 폴더의 문서를 먼저 확인해보세요 (version_matrix, px4_params, tutorial_offboard 등).
+  - name: 미션 정의서
+    url: https://github.com/2026-KAU-Capstone-Design/interceptor_drone/tree/main/missions
+    about: 각 미션의 목표, 측정 항목, 제출 체크리스트를 확인하세요.

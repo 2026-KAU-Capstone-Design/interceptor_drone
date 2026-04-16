@@ -1,0 +1,48 @@
+name: 📖 Documentation
+description: 문서 추가/수정 요청
+title: "[Docs] "
+labels: ["documentation"]
+body:
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: 문서 종류
+      options:
+        - 신규 작성
+        - 기존 문서 수정
+        - 잘못된 정보 정정
+        - 번역
+    validations:
+      required: true
+
+  - type: input
+    id: target_doc
+    attributes:
+      label: 대상 문서
+      placeholder: docs/tutorial_offboard.md 또는 신규 파일명
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 무엇이 필요한가
+      description: 추가/수정할 내용의 요지
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 왜 필요한가
+      description: 없으면 팀에 어떤 불편이 있는지
+    validations:
+      required: true
+
+  - type: textarea
+    id: draft
+    attributes:
+      label: 초안 (선택)
+      description: 이미 작성 중이거나 참고 자료가 있으면 붙여넣기
+    validations:
+      required: false
