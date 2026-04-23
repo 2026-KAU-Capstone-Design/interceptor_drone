@@ -23,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'offboard_hover = interceptor_control.offboard_hover:main',
+            'point_nav = interceptor_control.missions.mission2_nav.point_nav:main',
         ],
     },
 )
