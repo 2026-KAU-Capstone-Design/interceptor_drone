@@ -243,6 +243,29 @@ else
     ok "X500 airframe 패치 이미 적용됨 — 건너뜀"
 fi
 
+# X500 모델 패치 — enable_wind 추가 (Gazebo 바람이 드론에 실제로 힘을 가하게 함)
+# PX4 기본 X500 모델에는 <enable_wind> 태그가 없어서, 월드에 바람을 설정해도
+# 드론이 바람 힘을 받지 못함. base_link에 enable_wind=true 를 추가하면 해결됨.
+X500_MODEL_FILE="${DEV_DIR}/PX4-Autopilot/Tools/simulation/gz/models/x500_base/model.sdf"
+
+if [ -f "${X500_MODEL_FILE}" ]; then
+    if ! grep -q "<enable_wind>" "${X500_MODEL_FILE}"; then
+        sed -i 's|<gravity>true</gravity>|<gravity>true</gravity>\n      <enable_wind>true</enable_wind>|' "${X500_MODEL_FILE}"
+        ok "X500 모델에 <enable_wind>true</enable_wind> 추가됨"
+    else
+        ok "X500 모델 enable_wind 이미 적용됨 — 건너뜀"
+    fi
+else
+    warn "X500 모델 파일을 찾을 수 없습니다: ${X500_MODEL_FILE}"
+fi
+
+# 커스텀 Gazebo 월드 복사 (baylands_windy, baylands_storm)
+PX4_WORLDS_DIR="${DEV_DIR}/PX4-Autopilot/Tools/simulation/gz/worlds"
+if [ -d "${REPO_ROOT}/simulation/worlds" ]; then
+    cp -n "${REPO_ROOT}"/simulation/worlds/*.sdf "${PX4_WORLDS_DIR}/" 2>/dev/null || true
+    ok "커스텀 Gazebo 월드를 PX4 worlds 폴더로 복사"
+fi
+
 ok "PX4 ${PX4_VERSION} 준비 완료"
 
 # =============================================================================
