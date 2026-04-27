@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""
+Interceptor Drone — Offboard Hover Node (팀원 미션 템플릿)
+==========================================================
+
+Offboard 모드로 이륙 → 호버 → 착륙하는 기본 노드.
+팀원들은 이 코드를 복사해서 미션별 코드를 작성합니다.
+
+포함 기능:
+  - 3-메시지 패턴 (OffboardControlMode + TrajectorySetpoint + VehicleCommand)
+  - 비행 상태 머신 (IDLE → PREFLIGHT → ARMING → TAKEOFF → HOVER → LANDING → DONE)
+  - 풍속 추정 + 강풍 시 자동 RTL/비상착륙
+  - 자세 교란 감지 (기울기 > 30° 이후 2초 내 미복원 → 비상착륙)
+  - 호버/착륙 오차 통계 출력
+
+사용법:
+  ros2 run interceptor_control offboard_hover
+  ros2 run interceptor_control offboard_hover --ros-args -p target_altitude:=-10.0
+
+파라미터 (config/mission_params.yaml 로 일괄 설정 가능):
+  - target_altitude: 목표 고도 (NED, 음수=위) [기본: -5.0]
+  - hover_duration:  호버 유지 시간(초)        [기본: 30.0]
+  - wind_speed_warn: 풍속 경고 기준 (m/s)      [기본: 8.0]
+  - wind_speed_critical: 강풍 RTL 기준 (m/s)   [기본: 15.0]
+  - attitude_recovery_timeout: 자세 복원 타임아웃(초) [기본: 2.0]
+  - position_threshold: 위치 도달 판정 거리 (m) [기본: 0.5]
+"""
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+import numpy as np
+from enum import Enum, auto
+
+from px4_msgs.msg import (
+    OffboardControlMode,
+    TrajectorySetpoint,
+    VehicleCommand,
+    VehicleLocalPosition,
+    VehicleStatus,
+    VehicleOdometry,
+)
+
+# =============================================================================
+# 비행 상태 머신
+# =============================================================================
+class FlightState(Enum):
+    IDLE = auto()
+    PREFLIGHT = auto()
+    ARMING = auto()
+    TAKEOFF = auto()
+    MOVE_TO_B = auto()
+    HOLD_B = auto()
+    RETURN_TO_A = auto()
+    RTL = auto()
+    LANDING = auto()
+    DONE = auto()
+
+# =============================================================================
+# QoS Profile (PX4 uXRCE-DDS 호환)
+# =============================================================================
+PX4_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+
+
+class OffboardHover(Node):
+    def __init__(self):
+        super().__init__('point_nav')
+
+        # ROS2 Parameters
+        self.declare_parameter('target_altitude', -5.0)
+        self.declare_parameter('wind_speed_warn', 8.0)
+        self.declare_parameter('wind_speed_critical', 15.0)
+        self.declare_parameter('attitude_recovery_timeout', 2.0)
+        self.declare_parameter('position_threshold', 0.5)
+        self.declare_parameter('tilt_threshold_deg', 30.0)
+
+        self.target_alt = self.get_parameter('target_altitude').value
+        self.wind_warn = self.get_parameter('wind_speed_warn').value
+        self.wind_critical = self.get_parameter('wind_speed_critical').value
+        self.att_timeout = self.get_parameter('attitude_recovery_timeout').value
+        self.pos_threshold = self.get_parameter('position_threshold').value
+        self.tilt_threshold = self.get_parameter('tilt_threshold_deg').value
+
+        # Mission points
+        self.point_a = (0.0, 0.0)
+        self.point_b = (20.0, 0.0)
+        self.hold_time = 5.0
+        self.hold_start_time = None
+        self.takeoff_xy = [0.0, 0.0]
+
+        # Publishers
+        self.offboard_pub = self.create_publisher(
+            OffboardControlMode, '/fmu/in/offboard_control_mode', PX4_QOS)
+        self.setpoint_pub = self.create_publisher(
+            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', PX4_QOS)
+        self.command_pub = self.create_publisher(
+            VehicleCommand, '/fmu/in/vehicle_command', PX4_QOS)
+
+        # Subscribers
+        self.create_subscription(
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+            self._cb_local_pos, PX4_QOS)
+        self.create_subscription(
+            VehicleStatus, '/fmu/out/vehicle_status_v1',
+            self._cb_status, PX4_QOS)
+        self.create_subscription(
+            VehicleOdometry, '/fmu/out/vehicle_odometry',
+            self._cb_odometry, PX4_QOS)
+
+        # Internal states
+        self.state = FlightState.IDLE
+        self.local_pos = VehicleLocalPosition()
+        self.vehicle_status = VehicleStatus()
+        self.setpoint_counter = 0
+
+        # Safety monitor
+        self.wind_speed_est = 0.0
+        self.tilt_deg = 0.0
+        self.attitude_disturbed_since = None
+
+        # 10 Hz control loop
+        self.timer = self.create_timer(0.1, self._control_loop)
+
+        self.get_logger().info('=== Mission 2: Point Navigation ===')
+        self.get_logger().info(f'  목표 고도 : {abs(self.target_alt):.1f}m')
+        self.get_logger().info(f'  A 지점    : {self.point_a}')
+        self.get_logger().info(f'  B 지점    : {self.point_b}')
+        self.get_logger().info(f'  B 정지시간: {self.hold_time:.1f}s')
+
+    def horizontal_distance_to(self, target_x, target_y):
+        dx = self.local_pos.x - target_x
+        dy = self.local_pos.y - target_y
+        return float(np.sqrt(dx**2 + dy**2))
+
+    # =========================================================================
+    # Subscriber Callbacks
+    # =========================================================================
+
+    def _cb_local_pos(self, msg):
+        self.local_pos = msg
+        if self.state in (
+            FlightState.MOVE_TO_B,
+            FlightState.HOLD_B,
+            FlightState.RETURN_TO_A
+        ) and msg.v_xy_valid:
+            self.wind_speed_est = float(np.sqrt(msg.vx**2 + msg.vy**2))
+
+    def _cb_status(self, msg):
+        self.vehicle_status = msg
+
+    def _cb_odometry(self, msg):
+        q = msg.q  # [w, x, y, z]
+        if len(q) < 4:
+            return
+
+        sinr = 2.0 * (q[0] * q[1] + q[2] * q[3])
+        cosr = 1.0 - 2.0 * (q[1]**2 + q[2]**2)
+        roll = np.arctan2(sinr, cosr)
+
+        sinp = np.clip(2.0 * (q[0] * q[2] - q[3] * q[1]), -1.0, 1.0)
+        pitch = np.arcsin(sinp)
+
+        self.tilt_deg = float(np.degrees(np.sqrt(roll**2 + pitch**2)))
+        self._check_attitude_safety()
+
+    # =========================================================================
+    # Safety Monitors
+    # =========================================================================
+
+    def _check_wind_safety(self):
+        if self.state not in (
+            FlightState.MOVE_TO_B,
+            FlightState.HOLD_B,
+            FlightState.RETURN_TO_A
+        ):
+            return True
+
+        if self.wind_speed_est >= self.wind_critical:
+            self.get_logger().error(
+                f'[WIND CRITICAL] {self.wind_speed_est:.1f}m/s ≥ {self.wind_critical}m/s → RTL'
+            )
+            self.state = FlightState.RTL
+            return False
+
+        if self.wind_speed_est >= self.wind_warn:
+            self.get_logger().warn(
+                f'[WIND WARNING] {self.wind_speed_est:.1f}m/s ≥ {self.wind_warn}m/s'
+            )
+        return True
+
+    def _check_attitude_safety(self):
+        if self.state in (FlightState.IDLE, FlightState.PREFLIGHT, FlightState.DONE):
+            return
+
+        if self.tilt_deg > self.tilt_threshold:
+            now = self.get_clock().now()
+            if self.attitude_disturbed_since is None:
+                self.attitude_disturbed_since = now
+                self.get_logger().warn(
+                    f'[ATTITUDE] 기울기 {self.tilt_deg:.1f}° > {self.tilt_threshold}° — 복원 대기'
+                )
+            else:
+                elapsed = (now - self.attitude_disturbed_since).nanoseconds / 1e9
+                if elapsed > self.att_timeout:
+                    self.get_logger().error(
+                        f'[ATTITUDE CRITICAL] {elapsed:.1f}초 내 복원 실패 → 비상 착륙'
+                    )
+                    self.state = FlightState.LANDING
+        else:
+            if self.attitude_disturbed_since is not None:
+                elapsed = (self.get_clock().now() - self.attitude_disturbed_since).nanoseconds / 1e9
+                self.get_logger().info(f'[ATTITUDE] 자세 복원 완료 ({elapsed:.2f}초)')
+                self.attitude_disturbed_since = None
+
+    # =========================================================================
+    # PX4 Command Helpers
+    # =========================================================================
+
+    def _now_us(self):
+        return int(self.get_clock().now().nanoseconds / 1000)
+
+    def publish_offboard_mode(self, position=True):
+        msg = OffboardControlMode()
+        msg.position = position
+        msg.velocity = False
+        msg.acceleration = False
+        msg.attitude = False
+        msg.body_rate = False
+        msg.timestamp = self._now_us()
+        self.offboard_pub.publish(msg)
+
+    def publish_setpoint(self, x=0.0, y=0.0, z=-5.0, yaw=0.0):
+        msg = TrajectorySetpoint()
+        msg.position = [float(x), float(y), float(z)]
+        msg.yaw = float(yaw)
+        msg.timestamp = self._now_us()
+        self.setpoint_pub.publish(msg)
+
+    def send_command(self, command, param1=0.0, param2=0.0, param7=0.0):
+        msg = VehicleCommand()
+        msg.command = command
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
+        msg.param7 = float(param7)
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = self._now_us()
+        self.command_pub.publish(msg)
+
+    def arm(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+        self.get_logger().info('[CMD] ARM')
+
+    def engage_offboard(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
+        self.get_logger().info('[CMD] OFFBOARD 모드 전환')
+
+    def land(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+        self.get_logger().info('[CMD] LAND')
+
+    def return_to_launch(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
+        self.get_logger().info('[CMD] RTL')
+
+    # =========================================================================
+    # Main Control Loop
+    # =========================================================================
+
+    def _control_loop(self):
+        self.publish_offboard_mode()
+
+        if self.state == FlightState.IDLE:
+            self.publish_setpoint(x=self.point_a[0], y=self.point_a[1], z=self.target_alt)
+            self.state = FlightState.PREFLIGHT
+            self.setpoint_counter = 0
+            self.get_logger().info('→ PREFLIGHT')
+
+        elif self.state == FlightState.PREFLIGHT:
+            self.publish_setpoint(x=self.point_a[0], y=self.point_a[1], z=self.target_alt)
+            self.setpoint_counter += 1
+            if self.setpoint_counter >= 10:
+                self.state = FlightState.ARMING
+                self.get_logger().info('→ ARMING')
+
+        elif self.state == FlightState.ARMING:
+            self.publish_setpoint(x=self.point_a[0], y=self.point_a[1], z=self.target_alt)
+            self.engage_offboard()
+            self.arm()
+            self.takeoff_xy = [self.local_pos.x, self.local_pos.y]
+            self.state = FlightState.TAKEOFF
+            self.get_logger().info(f'→ TAKEOFF (목표 {abs(self.target_alt):.1f}m)')
+
+        elif self.state == FlightState.TAKEOFF:
+            self.publish_setpoint(x=self.point_a[0], y=self.point_a[1], z=self.target_alt)
+            alt_err = abs(self.local_pos.z - self.target_alt)
+            if alt_err < self.pos_threshold:
+                self.state = FlightState.MOVE_TO_B
+                self.get_logger().info('→ MOVE_TO_B')
+
+        elif self.state == FlightState.MOVE_TO_B:
+            self.publish_setpoint(x=self.point_b[0], y=self.point_b[1], z=self.target_alt)
+            self._check_wind_safety()
+
+            if self.horizontal_distance_to(self.point_b[0], self.point_b[1]) < self.pos_threshold:
+                self.hold_start_time = self.get_clock().now()
+                self.state = FlightState.HOLD_B
+                self.get_logger().info('→ HOLD_B (5초 정지)')
+
+        elif self.state == FlightState.HOLD_B:
+            self.publish_setpoint(x=self.point_b[0], y=self.point_b[1], z=self.target_alt)
+            self._check_wind_safety()
+
+            elapsed = (self.get_clock().now() - self.hold_start_time).nanoseconds / 1e9
+            if elapsed >= self.hold_time:
+                self.state = FlightState.RETURN_TO_A
+                self.get_logger().info('→ RETURN_TO_A')
+
+        elif self.state == FlightState.RETURN_TO_A:
+            self.publish_setpoint(x=self.point_a[0], y=self.point_a[1], z=self.target_alt)
+            self._check_wind_safety()
+
+            if self.horizontal_distance_to(self.point_a[0], self.point_a[1]) < self.pos_threshold:
+                self.state = FlightState.LANDING
+                self.get_logger().info('→ LANDING')
+
+        elif self.state == FlightState.RTL:
+            self.return_to_launch()
+            self.state = FlightState.DONE
+            self.get_logger().info('→ DONE (RTL 실행됨)')
+
+        elif self.state == FlightState.LANDING:
+            self.land()
+            self._print_landing_stats()
+            self.state = FlightState.DONE
+            self.get_logger().info('→ DONE (착륙 명령 전송됨)')
+
+        elif self.state == FlightState.DONE:
+            self.publish_setpoint(z=0.0)
+
+    # =========================================================================
+    # Statistics
+    # =========================================================================
+
+    def _print_landing_stats(self):
+        dx = self.local_pos.x - self.takeoff_xy[0]
+        dy = self.local_pos.y - self.takeoff_xy[1]
+        err = np.sqrt(dx**2 + dy**2)
+        self.get_logger().info('──── 착륙 오차 ────')
+        self.get_logger().info(f'  이륙 지점 : ({self.takeoff_xy[0]:.3f}, {self.takeoff_xy[1]:.3f})')
+        self.get_logger().info(f'  현재 위치 : ({self.local_pos.x:.3f}, {self.local_pos.y:.3f})')
+        self.get_logger().info(f'  수평 오차 : {err:.3f}m')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OffboardHover()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Ctrl+C → 착륙 명령')
+        node.land()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
