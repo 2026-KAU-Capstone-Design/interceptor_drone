@@ -23,26 +23,44 @@ missions/
 
 ## 실행 환경
 
-### 무풍 (baylands)
+> **권장:** `simple_windy` / `simple_storm` 사용 (Fuel 의존성 없음, 가볍고 바람 확실히 적용).
+> baylands 계열은 지형 시각화가 필요할 때만 사용.
+
+### 무풍 / 가벼운 환경 (default 또는 baylands)
 ```bash
-# 커스텀 월드를 PX4에 복사 (최초 1회)
+# 커스텀 월드는 setup_dev_env.sh가 자동 복사. 수동으로 하려면:
 cp simulation/worlds/*.sdf ~/dev/PX4-Autopilot/Tools/simulation/gz/worlds/
 
 # T1
 MicroXRCEAgent udp4 -p 8888
-# T2
-cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=baylands make px4_sitl gz_x500
+# T2 — 가장 가벼운 무풍
+cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=default make px4_sitl gz_x500
 # T3
 ros2 run interceptor_control offboard_hover
 ```
 
-### 보통풍 (baylands_windy, ~5.4m/s)
+### 보통풍 (simple_windy, ~5.4m/s) ★ 권장
 ```bash
-# T2만 변경
-cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=baylands_windy make px4_sitl gz_x500
+# T2만 변경 — Fuel 다운로드 없이 빠르게 로드
+cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=simple_windy make px4_sitl gz_x500
 ```
 
-### 강풍 (baylands_storm, ~11.7m/s)
+### 강풍 (simple_storm, ~11.7m/s) ★ 권장
+```bash
+# T2만 변경 — 안전 모니터(WIND CRITICAL → RTL) 검증용
+cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=simple_storm make px4_sitl gz_x500
+```
+
+### baylands 변형 (지형 시각화 필요시)
+
+baylands 계열은 첫 실행 시 Gazebo Fuel에서 공원/해안수 모델을
+다운로드하므로 인터넷 필수이며 로딩이 느립니다.
+
+```bash
+# 보통풍 baylands
+cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=baylands_windy make px4_sitl gz_x500
+
+# 강풍 baylands
 ```bash
 # T2만 변경
 cd $PX4_AUTOPILOT_DIR && PX4_GZ_WORLD=baylands_storm make px4_sitl gz_x500
