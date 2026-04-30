@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  simple_storm.sdf — 가벼운 하늘+지면 월드 + 강풍 (~11.7 m/s)
+
+  특징:
+    - simple_windy.sdf 와 동일하게 Fuel 의존성 없음, 가벼움
+    - <wind> 10 6 0 m/s = 합산 ~11.7 m/s (강풍 범위 8~15 m/s)
+    - 자세 복원 2초 이내 + 자동 RTL 안전장치 검증용
+
+  사용:
+    PX4_GZ_WORLD=simple_storm make px4_sitl gz_x500
+-->
+<sdf version="1.9">
+  <world name="simple_storm">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.4 0.5 0.6 1</background>
+      <grid>false</grid>
+      <sky>
+        <clouds>
+          <speed>10</speed>
+        </clouds>
+      </sky>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sun" type="directional">
+      <pose>0 0 500 0 -0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>0.8</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.85 0.85 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.3 0.4 0.3 1</ambient>
+            <diffuse>0.3 0.5 0.3 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+        <inertial>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1</iyy><iyz>0</iyz><izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>true</enable_wind>
+      </link>
+    </model>
+
+    <!-- 강풍 ~11.7 m/s (강풍 범위 8~15 m/s 검증용) -->
+    <wind>
+      <linear_velocity>10 6 0</linear_velocity>
+    </wind>
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>37.5665</latitude_deg>
+      <longitude_deg>126.9780</longitude_deg>
+      <elevation>30</elevation>
+    </spherical_coordinates>
+  </world>
+</sdf>
