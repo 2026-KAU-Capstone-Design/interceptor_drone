@@ -1,0 +1,31 @@
+Mission 1 Hover/Landing Analysis
+
+Bag:
+missions/mission1_hover/rosbags/run_no_wind
+
+Total samples:
+19677
+
+Max altitude:
+5.012 m
+
+Hover samples near 5m:
+3121
+
+Landing error:
+0.070 m
+Criteria: < 0.3 m
+Result: PASS
+
+Hover drift std:
+x_std = 0.026 m
+y_std = 0.030 m
+combined_std = 0.040 m
+Criteria: < 0.2 m
+Result: PASS
+
+Start position:
+x = 0.013, y = -0.013
+
+Landing position:
+x = -0.018, y = 0.049
