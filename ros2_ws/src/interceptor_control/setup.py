@@ -27,6 +27,8 @@ setup(
             'hover_land = interceptor_control.missions.mission1_hover.hover_land:main',
             # 카메라 이미지 수신 검증 노드
             'image_probe = interceptor_control.perception.image_probe:main',
+            # Mission 3: 풍선 요격
+            'intercept = interceptor_control.missions.mission3_intercept.intercept:main',
         ],
     },
 )
