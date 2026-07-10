@@ -13,23 +13,34 @@ from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
 
-from interceptor_control.missions.point_to_point.point_logger_v2 import PointLogger
+from interceptor_control.missions.circle.circle_logger import CircleLogger
 
-class PointMission(Node):
+class CircleMission(Node):
     def __init__(self):
-        super().__init__('point_mission')
+        super().__init__('circle_mission')
 
         self.waypoints = [
-            [0.0, 0.0, -5.0],
-            [5.0, 0.0, -5.0],
-            [5.0, 5.0, -5.0],
-            [0.0, 5.0, -5.0],
-            [0.0, 0.0, -5.0],
+            [0.0, 0.0, -5.0],  # Takeoff point
+            [5.0, 0.0, -5.0],  # Circle start point
         ]
 
         self.current_wp_index = 0
         self.acceptance_radius = 0.5
         self.hold_time = 2.0
+
+        # Circle Mission Parameters
+        self.circle_center_x = 0.0
+        self.circle_center_y = 0.0
+        self.circle_radius = 5.0
+
+        self.circle_altitude = -5.0
+
+        self.angular_speed = 0.35      # rad/s
+        self.theta = 0.0
+        self.start_theta = None
+
+        self.circle_started = False
+        self.circle_completed = False
 
         self.offboard_setpoint_counter = 0
         self.hold_start_time = None
@@ -51,7 +62,7 @@ class PointMission(Node):
             Path.home() / "Documents" / "interceptor_drone" / "ros2_ws"
         )
 
-        self.logger = PointLogger(workspace_path)
+        self.logger = CircleLogger(workspace_path)
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -94,7 +105,7 @@ class PointMission(Node):
 
         self.timer = self.create_timer(0.05, self.timer_callback)
 
-        self.get_logger().info("Point-to-Point Mission Node Started")
+        self.get_logger().info("Circle Mission Node Started")
 
     def vehicle_local_position_callback(self, msg):
         self.current_x = msg.x
@@ -116,16 +127,22 @@ class PointMission(Node):
         self.logger.log(
             mission_elapsed,
             self.state,
-            self.current_wp_index,
+            self.theta,
             self.current_x,
             self.current_y,
             self.current_z,
             target_x,
             target_y,
             target_z,
+            self.circle_center_x,
+            self.circle_center_y,
+            self.circle_radius,
             self.current_vx,
             self.current_vy,
             self.current_vz,
+            0.0,   # roll
+            0.0,   # pitch
+            0.0,   # yaw
         )
 
         if self.state != "END":
@@ -149,10 +166,10 @@ class PointMission(Node):
 
             if dist < self.acceptance_radius:
                 self.get_logger().info("Takeoff point reached. Start waypoint mission.")
-                self.state = "MOVE"
+                self.state = "MOVE_TO_START"
                 self.current_wp_index = 1
 
-        elif self.state == "MOVE":
+        elif self.state == "MOVE_TO_START":
             target_x, target_y, target_z = self.get_current_target()
             dist = self.distance_to_target(target_x, target_y, target_z)
 
@@ -164,38 +181,48 @@ class PointMission(Node):
             )
 
             if dist < self.acceptance_radius:
-                self.logger.record_waypoint_reached(
-                    self.current_wp_index,
-                    mission_elapsed,
-                    dist,
-                    self.current_x,
-                    self.current_y,
-                    self.current_z,
+                self.get_logger().info(
+                   "Circle start point reached. Starting circle flight..."
                 )
 
-                self.get_logger().info(f"WP{self.current_wp_index} reached. Holding...")
-                self.hold_start_time = self.get_clock().now()
-                self.state = "HOLD"
-
-        elif self.state == "HOLD":
+                self.circle_start_time = self.get_clock().now()
+                self.theta = 0.0
+                self.circle_started = True
+                self.state = "CIRCLE"
+        elif self.state == "CIRCLE":
             elapsed = (
-                self.get_clock().now() - self.hold_start_time
+                self.get_clock().now() - self.circle_start_time
             ).nanoseconds / 1e9
 
-            self.get_logger().info(
-                f"Holding WP{self.current_wp_index}: "
-                f"{elapsed:.1f}s / {self.hold_time:.1f}s"
+            self.theta = self.angular_speed * elapsed
+
+            if self.theta >= 2.0 * math.pi:
+                self.theta = 2.0 * math.pi
+
+                self.logger.record_lap_complete(elapsed)
+
+                self.get_logger().info(
+                    f"Circle completed. Lap time: {elapsed:.2f} s"
+                )
+
+                self.state = "RETURN_HOME"
+
+        elif self.state == "RETURN_HOME":
+            dist = self.distance_to_target(
+                0.0,
+                0.0,
+                self.circle_altitude,
             )
 
-            if elapsed >= self.hold_time:
-                self.current_wp_index += 1
+            self.get_logger().info(
+                f"Returning Home... distance={dist:.2f} m"
+            )
 
-                if self.current_wp_index >= len(self.waypoints):
-                    self.get_logger().info("All waypoints complete. Descending...")
-                    self.state = "DESCEND"
-                else:
-                    self.get_logger().info(f"Next waypoint: WP{self.current_wp_index}")
-                    self.state = "MOVE"
+            if dist < self.acceptance_radius:
+                self.get_logger().info(
+                    "Home reached. Descending..."
+                )
+                self.state = "DESCEND"
 
         elif self.state == "DESCEND":
             self.get_logger().info(
@@ -211,7 +238,7 @@ class PointMission(Node):
         elif self.state == "END":
             if not self.finished:
                 csv_path, summary_path = self.logger.finish()
-                self.get_logger().info("Point-to-Point mission finished.")
+                self.get_logger().info("Circle mission finished.")
                 self.get_logger().info(f"CSV saved: {csv_path}")
                 self.get_logger().info(f"Summary saved: {summary_path}")
                 self.finished = True
@@ -224,6 +251,22 @@ class PointMission(Node):
 
         if self.state == "END":
             return self.current_x, self.current_y, self.current_z
+
+        if self.state == "CIRCLE":
+            target_x = (
+                self.circle_center_x
+                + self.circle_radius * math.cos(self.theta)
+            )
+
+            target_y = (
+                self.circle_center_y
+                + self.circle_radius * math.sin(self.theta)
+            )
+
+            return target_x, target_y, self.circle_altitude
+
+        if self.state == "RETURN_HOME":
+            return 0.0, 0.0, self.circle_altitude
 
         if self.current_wp_index >= len(self.waypoints):
             return 0.0, 0.0, -0.1
@@ -299,7 +342,7 @@ class PointMission(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PointMission()
+    node = CircleMission()
 
     try:
         rclpy.spin(node)
