@@ -22,11 +22,11 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'offboard_hover = interceptor_control.offboard_hover:main',
-            'point_nav = interceptor_control.missions.mission2_nav.point_nav:main',
-            'hover_land = interceptor_control.missions.mission1_hover.hover_land:main',
-            # 카메라 이미지 수신 검증 노드
+            # 실제 비행 노드
+            'intercept = interceptor_control.intercept:main',
             'image_probe = interceptor_control.perception.image_probe:main',
+            # 개발/테스트용
+            'offboard_hover = interceptor_control.offboard_hover:main',
         ],
     },
 )
