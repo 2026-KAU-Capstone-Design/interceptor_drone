@@ -396,7 +396,7 @@ class InterceptNode(Node):
         elif self.state == FlightState.PREFLIGHT:
             self._publish_position_sp(z=self.target_alt)
             self.setpoint_counter += 1
-            if self.setpoint_counter >= 10:  # 1초 사전 전송
+            if self.setpoint_counter >= 50:  # 5초 사전 전송 (EKF2 수렴 대기)
                 self.state = FlightState.ARMING
                 self.get_logger().info('→ ARMING')
 
@@ -410,6 +410,15 @@ class InterceptNode(Node):
 
         elif self.state == FlightState.TAKEOFF:
             self._publish_position_sp(z=self.target_alt)
+            # arming_state=1이면 ARM 안 된 것 → 재시도
+            if self.vehicle_status.arming_state != 2:
+                self.setpoint_counter += 1
+                if self.setpoint_counter % 50 == 0:  # 5초마다 재시도
+                    self.engage_offboard()
+                    self.arm()
+                    self.get_logger().warn(
+                        f'[TAKEOFF] ARM 미확인 (arming_state={self.vehicle_status.arming_state}) — 재시도')
+                return
             if abs(self.local_pos.z - self.target_alt) < self.pos_threshold:
                 self.miss_count = 0
                 self.state = FlightState.SEARCH
@@ -439,33 +448,46 @@ class InterceptNode(Node):
                     self.get_logger().info(
                         f'→ SEARCH ({self.lock_miss_limit}프레임 연속 미감지)')
                 else:
-                    # 잠깐 소실 → 마지막 명령 유지(정지)
-                    self._publish_velocity_sp()
+                    self._publish_velocity_sp()  # 제자리 정지 유지
                 return
 
             self.miss_count = 0
 
-            if self.near_2m:
+            # lock_on = YOLO 10프레임 확신(7/10) + 중앙 오차 100px 이내
+            # → 표적 확인 + 중앙 정렬 동시 달성 시 True
+
+            # 2m 이내 + lock_on → INTERCEPT 돌진
+            if self.near_2m and self.lock_on:
                 self.state = FlightState.INTERCEPT
-                self.get_logger().info('→ INTERCEPT (2m 이내 진입!)')
+                self.get_logger().info(
+                    f'→ INTERCEPT (2m + lock_on err=({self.bbox_dx:.0f},{self.bbox_dy:.0f})px)')
                 return
 
-            # lock_on 확정 후에만 전진, 미확정이면 조준만
-            v_fwd = self.v_approach if self.lock_on else 0.0
+            # lock_on이면 전진 접근, 아니면 제자리에서 중앙 정렬만
+            if self.lock_on:
+                v_fwd = self.v_approach
+                phase = "접근"
+            else:
+                v_fwd = 0.0
+                phase = "정렬"
+
             vx, vy, vz, yaw_rate = self._compute_velocity_cmd(v_fwd)
             self._publish_velocity_sp(vx, vy, vz, yaw_rate)
 
             self.get_logger().info(
-                f'[TRACK] lock={self.lock_on} dist={self.distance_m:.2f}m '
+                f'[TRACK/{phase}] lock={self.lock_on} dist={self.distance_m:.2f}m '
                 f'err=({self.bbox_dx:.0f},{self.bbox_dy:.0f})px '
-                f'cmd vx={vx:.2f} vy={vy:.2f} vz={vz:.2f} yaw={yaw_rate:.2f}')
+                f'vfwd={v_fwd:.1f} yaw={yaw_rate:.2f}')
 
         elif self.state == FlightState.INTERCEPT:
-            if not self.lock_on:
-                # 풍선 파괴 또는 소실 → 착륙
-                self.state = FlightState.LANDING
-                self.get_logger().info('→ LANDING (lock_on 소실 — 요격 완료 또는 표적 소실)')
+            if not self.detected:
+                self.miss_count += 1
+                if self.miss_count >= self.lock_miss_limit:
+                    self.miss_count = 0
+                    self.state = FlightState.LANDING
+                    self.get_logger().info('→ LANDING (표적 소실 — 요격 완료 또는 표적 소멸)')
                 return
+            self.miss_count = 0
 
             vx, vy, vz, yaw_rate = self._compute_velocity_cmd(self.v_intercept)
             self._publish_velocity_sp(vx, vy, vz, yaw_rate)

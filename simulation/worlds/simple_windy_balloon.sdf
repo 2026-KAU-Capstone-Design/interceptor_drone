@@ -143,5 +143,6 @@
       <longitude_deg>126.9780</longitude_deg>
       <elevation>30</elevation>
     </spherical_coordinates>
+
   </world>
 </sdf>
