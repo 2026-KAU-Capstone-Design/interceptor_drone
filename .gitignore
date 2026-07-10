@@ -54,3 +54,7 @@ log/
 yolov8n.pt
 *.onnx
 runs/
+ros2_ws/results/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
