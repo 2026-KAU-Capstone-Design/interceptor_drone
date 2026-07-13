@@ -275,6 +275,7 @@ class YoloLiveDetector(Node):
         if boxes is not None and len(boxes) > 0:
             for box in boxes:
                 cls_id = int(box.cls[0].item())
+                class_name = self.model.names.get(cls_id, str(cls_id))
                 conf = float(box.conf[0].item())
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
 
@@ -289,11 +290,16 @@ class YoloLiveDetector(Node):
                     continue
 
                 red_ratio = self.compute_red_ratio(frame, x1, y1, x2, y2)
-                if red_ratio < self.min_red_ratio:
-                    self.get_logger().info(
-                        f"reject red_ratio={red_ratio:.3f} conf={conf:.3f} bbox=({x1},{y1},{x2},{y2})"
-                    )
-                    continue
+
+                # class 0: balloon
+                # class 1: fixed_wing_uav
+                # red_ratio 필터는 빨간 풍선에만 적용한다.
+                if cls_id == 0:
+                    if red_ratio < self.min_red_ratio:
+                        self.get_logger().info(
+                            f"reject balloon red_ratio={red_ratio:.3f} conf={conf:.3f} bbox=({x1},{y1},{x2},{y2})"
+                        )
+                        continue
 
                 ok_jump, reason_jump = self.pass_jump_filter(cx, cy)
                 if not ok_jump:
@@ -304,6 +310,7 @@ class YoloLiveDetector(Node):
 
                 candidates.append({
                     "cls_id": cls_id,
+                    "class_name": class_name,
                     "conf": conf,
                     "x1": x1,
                     "y1": y1,
@@ -401,7 +408,7 @@ class YoloLiveDetector(Node):
             2,
         )
 
-        label = f"balloon {best['conf']:.2f} {distance_m:.2f}m red {best['red_ratio']:.2f}"
+        label = f"{best['class_name']} {best['conf']:.2f} {distance_m:.2f}m red {best['red_ratio']:.2f}"
         cv2.putText(
             annotated,
             label,
