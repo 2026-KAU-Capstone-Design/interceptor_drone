@@ -28,6 +28,9 @@ setup(
             'point_nav = interceptor_control.missions.mission2_nav.point_nav:main',
             'hover_land = interceptor_control.missions.mission1_hover.hover_land:main',
             'circle_mission = interceptor_control.missions.circle.circle_mission:main',
+            'figure8_mission = interceptor_control.missions.figure8.figure8_mission:main',
+	    'high_speed_mission = interceptor_control.missions.high_speed.high_speed_mission:main',
+	    'high_speed_velocity_mission = interceptor_control.missions.high_speed.high_speed_velocity_mission:main',
         ],
     },
 )
