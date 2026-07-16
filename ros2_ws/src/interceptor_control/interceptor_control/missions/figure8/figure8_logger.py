@@ -6,7 +6,7 @@ from typing import Any
 from interceptor_control.utils.mission_logger import MissionLogger
 
 
-class CircleLogger:
+class Figure8Logger:
     """Circle 미션 전용 로거."""
 
     FIELDNAMES = [
@@ -37,7 +37,7 @@ class CircleLogger:
 
     def __init__(self, workspace_path):
         self.common_logger = MissionLogger(
-            mission_name="circle",
+            mission_name="figure8",
             workspace_path=workspace_path,
             fieldnames=self.FIELDNAMES,
         )
@@ -239,16 +239,16 @@ class CircleLogger:
                 f"{max_speed:.3f} m/s"
             ),
             "Mean Absolute Roll": (
-                f"{mean_roll:.2f} deg"
+                f"{math.degrees(mean_roll):.2f} deg"
             ),
             "Max Absolute Roll": (
-                f"{max_roll:.2f} deg"
+                f"{math.degrees(max_roll):.2f} deg"
             ),
-	    "Mean Absolute Pitch": (
-    		f"{mean_pitch:.2f} deg"
-	    ),
-	    "Max Absolute Pitch": (
-    		f"{max_pitch:.2f} deg"
+            "Mean Absolute Pitch": (
+                f"{math.degrees(mean_pitch):.2f} deg"
+            ),
+            "Max Absolute Pitch": (
+                f"{math.degrees(max_pitch):.2f} deg"
             ),
             "Landing XY Error": (
                 f"{landing_xy_error:.3f} m"

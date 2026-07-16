@@ -12,6 +12,7 @@ from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
+from px4_msgs.msg import VehicleAttitude
 
 from interceptor_control.missions.point_to_point.point_logger_v2 import PointLogger
 
@@ -44,6 +45,10 @@ class PointMission(Node):
         self.current_vx = 0.0
         self.current_vy = 0.0
         self.current_vz = 0.0
+
+        self.current_roll = 0.0
+        self.current_pitch = 0.0
+        self.current_yaw = 0.0
 
         self.state = "INIT"
 
@@ -90,6 +95,13 @@ class PointMission(Node):
             '/fmu/out/vehicle_status',
             self.vehicle_status_callback,
             qos_profile
+        )
+
+        self.vehicle_attitude_subscriber = self.create_subscription(
+            VehicleAttitude,
+            "/fmu/out/vehicle_attitude",
+            self.vehicle_attitude_callback,
+            qos_profile,
         )
 
         self.timer = self.create_timer(0.05, self.timer_callback)

@@ -12,36 +12,30 @@ from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
-from px4_msgs.msg import VehicleAttitude
 
-from interceptor_control.missions.circle.circle_logger import CircleLogger
+from interceptor_control.missions.figure8.figure8_logger import Figure8Logger
 
-class CircleMission(Node):
+class Figure8Mission(Node):
     def __init__(self):
-        super().__init__('circle_mission')
+        super().__init__('figure8_mission')
 
         self.waypoints = [
             [0.0, 0.0, -5.0],  # Takeoff point
-            [5.0, 0.0, -5.0],  # Circle start point
+            [5.0, 0.0, -5.0],  # Figure-8 start point
         ]
 
         self.current_wp_index = 0
         self.acceptance_radius = 0.5
         self.hold_time = 2.0
+        # Figure-8 Parameters
+        self.figure8_radius = 5.0
+        self.figure8_altitude = -5.0
 
-        # Circle Mission Parameters
-        self.circle_center_x = 0.0
-        self.circle_center_y = 0.0
-        self.circle_radius = 5.0
-
-        self.circle_altitude = -5.0
-
-        self.angular_speed = 0.35      # rad/s
+        self.angular_speed = 0.35
         self.theta = 0.0
-        self.start_theta = None
 
-        self.circle_started = False
-        self.circle_completed = False
+        self.figure8_started = False
+        self.figure8_completed = False
 
         self.offboard_setpoint_counter = 0
         self.hold_start_time = None
@@ -56,9 +50,6 @@ class CircleMission(Node):
         self.current_vx = 0.0
         self.current_vy = 0.0
         self.current_vz = 0.0
-        self.current_roll = 0.0
-        self.current_pitch = 0.0
-        self.current_yaw = 0.0
 
         self.state = "INIT"
 
@@ -66,7 +57,7 @@ class CircleMission(Node):
             Path.home() / "Documents" / "interceptor_drone" / "ros2_ws"
         )
 
-        self.logger = CircleLogger(workspace_path)
+        self.logger = Figure8Logger(workspace_path)
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -107,17 +98,9 @@ class CircleMission(Node):
             qos_profile
         )
 
-
-        self.vehicle_attitude_subscriber = self.create_subscription(
-            VehicleAttitude,
-            "/fmu/out/vehicle_attitude",
-            self.vehicle_attitude_callback,
-            qos_profile,
-        )
-
         self.timer = self.create_timer(0.05, self.timer_callback)
 
-        self.get_logger().info("Circle Mission Node Started")
+        self.get_logger().info("Figure-8 Mission Node Started")
 
     def vehicle_local_position_callback(self, msg):
         self.current_x = msg.x
@@ -126,32 +109,6 @@ class CircleMission(Node):
         self.current_vx = msg.vx
         self.current_vy = msg.vy
         self.current_vz = msg.vz
-
-    def vehicle_attitude_callback(self, msg):
-        # Quaternion (w, x, y, z)
-        q = msg.q
-
-        w = q[0]
-        x = q[1]
-        y = q[2]
-        z = q[3]
-
-        # Roll
-        sinr_cosp = 2.0 * (w * x + y * z)
-        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        self.current_roll = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
-
-        # Pitch
-        sinp = 2.0 * (w * y - z * x)
-        if abs(sinp) >= 1:
-            self.current_pitch = math.degrees(math.copysign(math.pi / 2, sinp))
-        else:
-            self.current_pitch = math.degrees(math.asin(sinp))
-
-        # Yaw
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        self.current_yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
     def vehicle_status_callback(self, msg):
         pass
@@ -172,15 +129,15 @@ class CircleMission(Node):
             target_x,
             target_y,
             target_z,
-            self.circle_center_x,
-            self.circle_center_y,
-            self.circle_radius,
+            0.0,                  # center_x 임시값
+            0.0,                  # center_y 임시값
+            self.figure8_radius,  # 기준 크기
             self.current_vx,
             self.current_vy,
             self.current_vz,
-            self.current_roll,
-            self.current_pitch,
-            self.current_yaw,
+            0.0,   # roll
+            0.0,   # pitch
+            0.0,   # yaw
         )
 
         if self.state != "END":
@@ -220,16 +177,16 @@ class CircleMission(Node):
 
             if dist < self.acceptance_radius:
                 self.get_logger().info(
-                   "Circle start point reached. Starting circle flight..."
+                   "Figure-8 start point reached. Starting figure-8 flight..."
                 )
 
-                self.circle_start_time = self.get_clock().now()
+                self.figure8_start_time = self.get_clock().now()
                 self.theta = 0.0
-                self.circle_started = True
-                self.state = "CIRCLE"
-        elif self.state == "CIRCLE":
+                self.figure8_started = True
+                self.state = "FIGURE8"
+        elif self.state == "FIGURE8":
             elapsed = (
-                self.get_clock().now() - self.circle_start_time
+                self.get_clock().now() - self.figure8_start_time
             ).nanoseconds / 1e9
 
             self.theta = self.angular_speed * elapsed
@@ -240,7 +197,7 @@ class CircleMission(Node):
                 self.logger.record_lap_complete(elapsed)
 
                 self.get_logger().info(
-                    f"Circle completed. Lap time: {elapsed:.2f} s"
+                    f"Figure-8 completed. Lap time: {elapsed:.2f} s"
                 )
 
                 self.state = "RETURN_HOME"
@@ -249,7 +206,7 @@ class CircleMission(Node):
             dist = self.distance_to_target(
                 0.0,
                 0.0,
-                self.circle_altitude,
+                self.figure8_altitude,
             )
 
             self.get_logger().info(
@@ -276,7 +233,7 @@ class CircleMission(Node):
         elif self.state == "END":
             if not self.finished:
                 csv_path, summary_path = self.logger.finish()
-                self.get_logger().info("Circle mission finished.")
+                self.get_logger().info("Figure-8 mission finished.")
                 self.get_logger().info(f"CSV saved: {csv_path}")
                 self.get_logger().info(f"Summary saved: {summary_path}")
                 self.finished = True
@@ -290,21 +247,22 @@ class CircleMission(Node):
         if self.state == "END":
             return self.current_x, self.current_y, self.current_z
 
-        if self.state == "CIRCLE":
+        if self.state == "FIGURE8":
             target_x = (
-                self.circle_center_x
-                + self.circle_radius * math.cos(self.theta)
+                self.figure8_radius
+                * math.sin(self.theta)
             )
 
             target_y = (
-                self.circle_center_y
-                + self.circle_radius * math.sin(self.theta)
+                self.figure8_radius
+                * math.sin(self.theta)
+                * math.cos(self.theta)
             )
 
-            return target_x, target_y, self.circle_altitude
+            return target_x, target_y, self.figure8_altitude
 
         if self.state == "RETURN_HOME":
-            return 0.0, 0.0, self.circle_altitude
+            return 0.0, 0.0, self.figure8_altitude
 
         if self.current_wp_index >= len(self.waypoints):
             return 0.0, 0.0, -0.1
@@ -380,7 +338,7 @@ class CircleMission(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CircleMission()
+    node = Figure8Mission()
 
     try:
         rclpy.spin(node)
