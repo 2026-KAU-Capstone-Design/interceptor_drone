@@ -5,7 +5,7 @@ cd ~/Documents/interceptor_drone/ros2_ws
 source install/setup.bash
 
 python3 ~/Documents/interceptor_drone/tools/yolo_live_detect.py \
-  --model /home/ljy0313/Documents/interceptor_drone/ros2_ws/runs/detect/balloon_yolov8n_v3/weights/best.pt \
+  --model /home/ljy0313/Documents/interceptor_drone/ros2_ws/src/interceptor_control/models/target_yolov8n_v9_standard_vtol_front_best.pt \
   --topic /camera/image \
   --conf 0.4 \
   --show \
