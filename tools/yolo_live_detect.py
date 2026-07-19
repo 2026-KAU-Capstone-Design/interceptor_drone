@@ -153,7 +153,7 @@ class YoloLiveDetector(Node):
 
         return red_pixels / max(total_pixels, 1)
 
-    def pass_geometry_filter(self, x1, y1, x2, y2, image_w, image_h):
+    def pass_geometry_filter(self, cls_id, x1, y1, x2, y2, image_w, image_h):
         box_w = max(1, x2 - x1)
         box_h = max(1, y2 - y1)
         area = box_w * box_h
@@ -166,8 +166,18 @@ class YoloLiveDetector(Node):
             return False, f"area too large: {area / image_area:.3f}"
 
         aspect = box_w / box_h
-        if aspect < self.min_aspect_ratio or aspect > self.max_aspect_ratio:
-            return False, f"bad aspect: {aspect:.2f}"
+
+        # class 0: balloon
+        # 풍선은 대체로 둥근 물체이므로 기존 aspect ratio 기준 사용
+        if cls_id == 0:
+            if aspect < self.min_aspect_ratio or aspect > self.max_aspect_ratio:
+                return False, f"balloon bad aspect: {aspect:.2f}"
+
+        # class 1: fixed_wing_uav
+        # 고정익은 정면에서 가로로 길고 세로로 얇게 보일 수 있으므로 더 넓게 허용
+        elif cls_id == 1:
+            if aspect < 0.08 or aspect > 20.0:
+                return False, f"fixed_wing_uav bad aspect: {aspect:.2f}"
 
         return True, "ok"
 
@@ -284,7 +294,7 @@ class YoloLiveDetector(Node):
                 cx = (x1 + x2) / 2.0
                 cy = (y1 + y2) / 2.0
 
-                ok_geom, reason_geom = self.pass_geometry_filter(x1, y1, x2, y2, image_w, image_h)
+                ok_geom, reason_geom = self.pass_geometry_filter(cls_id, x1, y1, x2, y2, image_w, image_h)
                 if not ok_geom:
                     self.get_logger().debug(f"reject geometry: {reason_geom}")
                     continue
@@ -301,12 +311,18 @@ class YoloLiveDetector(Node):
                         )
                         continue
 
-                ok_jump, reason_jump = self.pass_jump_filter(cx, cy)
-                if not ok_jump:
-                    self.get_logger().info(
-                        f"reject jump: {reason_jump} conf={conf:.3f} bbox=({x1},{y1},{x2},{y2})"
-                    )
-                    continue
+                # Jump filter
+                # balloon은 기존처럼 적용
+                # fixed_wing_uav는 정면/측면 전환 시 bbox 중심이 크게 튈 수 있으므로 skip
+                if cls_id == 0:
+                    ok_jump, reason_jump = self.pass_jump_filter(cx, cy)
+                    if not ok_jump:
+                        self.get_logger().info(
+                            f"reject jump: {reason_jump} class={class_name} conf={conf:.3f} bbox=({x1},{y1},{x2},{y2})"
+                        )
+                        continue
+                else:
+                    ok_jump = True
 
                 candidates.append({
                     "cls_id": cls_id,
