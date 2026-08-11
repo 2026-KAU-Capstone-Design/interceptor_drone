@@ -1,0 +1,26 @@
+Mission 2 A-to- Navigation Analysis
+
+Bag:
+missions/mission2_nav/rosbags/run_no_wind
+
+Total samples:
+27930
+
+Target A:
+x = 0.022, y = 0.032
+
+Target B:
+x = 20.022, y = 0.032
+
+Closest B position:
+x = 19.900, y = 0.215
+
+B arrival error:
+0.219 m
+Criteria: < 0.5 m
+Result: PASS
+
+Path deviation:
+max_y_deviation = 1.261 m
+Criteria: < 0.3 m
+Result: FAIL
