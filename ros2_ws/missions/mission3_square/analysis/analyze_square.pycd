@@ -1,0 +1,143 @@
+import sqlite3
+import math
+from pathlib import Path
+
+import numpy as np
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
+
+bag_dir = Path("missions/mission3_square/rosbags/run_no_wind")
+db_path = bag_dir / "run_no_wind_0.db3"
+
+topic_name = "/fmu/out/vehicle_local_position"
+msg_type = get_message("px4_msgs/msg/VehicleLocalPosition")
+
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+
+cursor.execute("SELECT id FROM topics WHERE name = ?", (topic_name,))
+topic_id = cursor.fetchone()[0]
+
+cursor.execute(
+    "SELECT timestamp, data FROM messages WHERE topic_id = ? ORDER BY timestamp",
+    (topic_id,)
+)
+
+times, xs, ys, zs = [], [], [], []
+
+for timestamp, data in cursor.fetchall():
+    msg = deserialize_message(data, msg_type)
+    times.append(timestamp * 1e-9)
+    xs.append(msg.x)
+    ys.append(msg.y)
+    zs.append(msg.z)
+
+conn.close()
+
+times = np.array(times)
+xs = np.array(xs)
+ys = np.array(ys)
+zs = np.array(zs)
+times = times - times[0]
+altitudes = -zs
+
+# 시작점 A 기준 목표점
+x_a = xs[0]
+y_a = ys[0]
+
+targets = {
+    "B": (x_a + 10.0, y_a),
+    "C": (x_a + 10.0, y_a + 10.0),
+    "D": (x_a, y_a + 10.0),
+    "A_return": (x_a, y_a),
+}
+
+# 꼭짓점 도달 오차: 각 목표점에 가장 가까웠던 거리
+corner_errors = {}
+for name, (tx, ty) in targets.items():
+    dist = np.sqrt((xs - tx) ** 2 + (ys - ty) ** 2)
+    corner_errors[name] = float(np.min(dist))
+
+avg_corner_error = float(np.mean(list(corner_errors.values())))
+
+# 변 직선성: 각 변에서 이상 직선으로부터 최대 편차
+# A->B: y = y_a
+mask_ab = (xs >= x_a) & (xs <= x_a + 10.0) & (altitudes > 4.0)
+dev_ab = np.max(np.abs(ys[mask_ab] - y_a)) if np.any(mask_ab) else float("nan")
+
+# B->C: x = x_a + 10
+mask_bc = (ys >= y_a) & (ys <= y_a + 10.0) & (altitudes > 4.0)
+dev_bc = np.max(np.abs(xs[mask_bc] - (x_a + 10.0))) if np.any(mask_bc) else float("nan")
+
+# C->D: y = y_a + 10
+mask_cd = (xs >= x_a) & (xs <= x_a + 10.0) & (altitudes > 4.0)
+dev_cd = np.max(np.abs(ys[mask_cd] - (y_a + 10.0))) if np.any(mask_cd) else float("nan")
+
+# D->A: x = x_a
+mask_da = (ys >= y_a) & (ys <= y_a + 10.0) & (altitudes > 4.0)
+dev_da = np.max(np.abs(xs[mask_da] - x_a)) if np.any(mask_da) else float("nan")
+
+edge_deviations = {
+    "A->B": float(dev_ab),
+    "B->C": float(dev_bc),
+    "C->D": float(dev_cd),
+    "D->A": float(dev_da),
+}
+
+max_edge_deviation = float(np.nanmax(list(edge_deviations.values())))
+
+flight_time = float(times[-1] - times[0])
+
+corner_pass = avg_corner_error < 0.5
+edge_pass = max_edge_deviation < 0.5
+
+result = f"""Mission 3 Square Flight Analysis
+
+Bag:
+{bag_dir}
+
+Total samples:
+{len(xs)}
+
+Total flight time:
+{flight_time:.3f} s
+
+Corner errors:
+B        = {corner_errors["B"]:.3f} m
+C        = {corner_errors["C"]:.3f} m
+D        = {corner_errors["D"]:.3f} m
+A_return = {corner_errors["A_return"]:.3f} m
+
+Average corner error:
+{avg_corner_error:.3f} m
+Criteria: < 0.5 m
+Result: {"PASS" if corner_pass else "FAIL"}
+
+Edge straightness max deviation:
+A->B = {edge_deviations["A->B"]:.3f} m
+B->C = {edge_deviations["B->C"]:.3f} m
+C->D = {edge_deviations["C->D"]:.3f} m
+D->A = {edge_deviations["D->A"]:.3f} m
+
+Max edge deviation:
+{max_edge_deviation:.3f} m
+Criteria: < 0.5 m
+Result: {"PASS" if edge_pass else "FAIL"}
+"""
+
+print(result)
+
+Path("missions/mission3_square/analysis/result.txt").write_text(result, encoding="utf-8")
+
+csv_path = Path("missions/mission3_square/analysis/path_data.csv")
+with csv_path.open("w", encoding="utf-8") as f:
+    f.write("time,x,y,z,altitude\n")
+    for t, x, y, z, alt in zip(times, xs, ys, zs, altitudes):
+        f.write(f"{t:.3f},{x:.6f},{y:.6f},{z:.6f},{alt:.6f}\n")
+
+print("Saved result.txt")
+print("Saved path_data.csv")
+
+
+
+

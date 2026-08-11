@@ -1,0 +1,41 @@
+Mission 3 Square Flight Analysis
+
+Bag:
+missions/mission3_square/rosbags/run_no_wind
+
+Total samples:
+8485
+
+Flight time above 4m:
+13.180 s
+
+Target points:
+A = (-0.020, 0.063)
+B = (9.980, 0.063)
+C = (9.980, 10.063)
+D = (-0.020, 10.063)
+
+Corner errors:
+B        = 0.008 m
+C        = 0.028 m
+D        = 0.162 m
+A_return = 0.164 m
+
+Average corner error:
+0.091 m
+Criteria: < 0.5 m
+Result: PASS
+
+Edge straightness max deviation:
+A->B = 0.992 m
+B->C = 0.623 m
+C->D = 0.567 m
+D->A = 0.506 m
+
+Max edge deviation:
+0.992 m
+Criteria: < 0.5 m
+Result: FAIL
+
+Cumulative path error:
+4.284 m*s

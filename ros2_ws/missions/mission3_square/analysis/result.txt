@@ -1,0 +1,41 @@
+Mission 3 Square Flight Analysis
+
+Bag:
+missions/mission3_square/rosbags/run_windy
+
+Total samples:
+7244
+
+Flight time above 4m:
+13.240 s
+
+Target points:
+A = (-0.057, 0.366)
+B = (9.943, 0.366)
+C = (9.943, 10.366)
+D = (-0.057, 10.366)
+
+Corner errors:
+B        = 0.176 m
+C        = 0.209 m
+D        = 0.139 m
+A_return = 0.117 m
+
+Average corner error:
+0.160 m
+Criteria: < 0.5 m
+Result: PASS
+
+Edge straightness max deviation:
+A->B = 1.046 m
+B->C = 0.665 m
+C->D = 0.291 m
+D->A = 0.350 m
+
+Max edge deviation:
+1.046 m
+Criteria: < 0.5 m
+Result: FAIL
+
+Cumulative path error:
+3.844 m*s
