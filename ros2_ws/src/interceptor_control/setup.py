@@ -32,6 +32,7 @@ setup(
 	    'high_speed_mission = interceptor_control.missions.high_speed.high_speed_mission:main',
 	    'high_speed_velocity_mission = interceptor_control.missions.high_speed.high_speed_velocity_mission:main',
 	    'transition_1_mission = interceptor_control.missions.transition.transition_1_mission:main',
+        'transition_2_mission = interceptor_control.missions.transition.transition_2.transition_2_mission:main',      
         ],
     },
 )
