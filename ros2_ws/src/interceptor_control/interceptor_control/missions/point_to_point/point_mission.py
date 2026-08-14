@@ -20,6 +20,12 @@ class PointMission(Node):
     def __init__(self):
         super().__init__('point_mission')
 
+
+        # 자세 초기값
+        self.roll = 0.0
+        self.pitch = 0.0
+        self.yaw = 0.0
+
         self.waypoints = [
             [0.0, 0.0, -5.0],
             [5.0, 0.0, -5.0],
@@ -230,6 +236,32 @@ class PointMission(Node):
 
             self.timer.cancel()
 
+    def vehicle_attitude_callback(self, msg):
+        """PX4 quaternion attitude를 Roll, Pitch, Yaw로 변환한다."""
+
+        q = msg.q
+
+        if len(q) < 4:
+            return
+
+        w = float(q[0])
+        x = float(q[1])
+        y = float(q[2])
+        z = float(q[3])
+
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        self.roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        sinp = 2.0 * (w * y - z * x)
+        if abs(sinp) >= 1.0:
+            self.pitch = math.copysign(math.pi / 2.0, sinp)
+        else:
+            self.pitch = math.asin(sinp)
+
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        self.yaw = math.atan2(siny_cosp, cosy_cosp)
     def get_current_target(self):
         if self.state == "DESCEND":
             return 0.0, 0.0, -0.1
