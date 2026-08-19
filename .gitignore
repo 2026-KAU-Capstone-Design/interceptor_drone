@@ -58,3 +58,12 @@ ros2_ws/results/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local backup files
+*_backup.py
+*_backup_*.py
+*_backup_success.py
