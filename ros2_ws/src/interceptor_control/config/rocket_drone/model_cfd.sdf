@@ -278,6 +278,41 @@
         <always_on>1</always_on>
         <update_rate>30</update_rate>
       </sensor>
+
+      <!-- ROCKET_DRONE_UPWARD_CAMERA -->
+      <!-- Global-shutter camera simulation for target detection -->
+      <sensor name="rocket_front_up_camera" type="camera">
+
+        <!-- 30 Hz camera -->
+        <update_rate>30</update_rate>
+
+        <!-- Camera position relative to base_link
+             x = front, y = center, z = upper side
+             pitch = -35 deg (upward looking) -->
+        <pose>0.18 0 0.12 0 -0.6109 0</pose>
+
+        <camera>
+          <!-- Approx. 90 deg horizontal FOV -->
+          <horizontal_fov>1.5708</horizontal_fov>
+
+          <image>
+            <width>1280</width>
+            <height>720</height>
+            <format>R8G8B8</format>
+          </image>
+
+          <clip>
+            <near>0.1</near>
+            <far>300</far>
+          </clip>
+        </camera>
+
+        <always_on>true</always_on>
+        <visualize>true</visualize>
+
+        <topic>/rocket_drone/camera/image</topic>
+
+      </sensor>
     </link>
     <link name="rotor_0">
       <gravity>true</gravity>

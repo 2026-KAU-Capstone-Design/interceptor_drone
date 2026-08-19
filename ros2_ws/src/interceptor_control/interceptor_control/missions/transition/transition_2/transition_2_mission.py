@@ -14,7 +14,7 @@ from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleAttitude
 from px4_msgs.msg import VehicleAttitudeSetpoint
-
+from interceptor_control.missions.transition.transition_2.transition_2_logger import Transition2Logger
 
 class Transition2Mission(Node):
 
@@ -28,7 +28,7 @@ class Transition2Mission(Node):
         # Pitch-step parameters [deg]
         self.pitch_steps = [
             0.0,
-            -10.0,
+            -30.0,
         ]
 
         self.pitch_step_index = 0
@@ -53,6 +53,9 @@ class Transition2Mission(Node):
         # PX4 hover thrust parameter (MPC_THR_HOVER)
         self.hover_thrust = 0.60
 
+        # Thrust compensation limit
+        self.max_transition_thrust = 0.70
+
         self.offboard_setpoint_counter = 0
         self.state = "INIT"
 
@@ -63,6 +66,13 @@ class Transition2Mission(Node):
         self.disarm_sent = False
 
         self.mission_start_time = self.get_clock().now()
+
+        # Transition 2 Logger
+        workspace_path = Path(__file__).resolve().parents[6]
+
+        self.logger = Transition2Logger(
+            workspace_path=workspace_path
+        )
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -175,6 +185,8 @@ class Transition2Mission(Node):
 
     def timer_callback(self):
         now = self.get_clock().now()
+
+        self.log_current_state()
 
         # Offboard setpoint를 먼저 일정 횟수 전송한 뒤 Arm / Offboard 진입
         self.publish_offboard_control_mode()
@@ -358,13 +370,45 @@ class Transition2Mission(Node):
         elif self.state == "END":
 
             if not self.finished:
+                csv_path, summary_path = self.logger.finish()
+
                 self.get_logger().info(
                     "Transition 2 Pitch-Step Mission Finished"
+                )
+                self.get_logger().info(
+                    f"CSV saved: {csv_path}"
+                )
+                self.get_logger().info(
+                    f"Summary saved: {summary_path}"
                 )
 
                 self.finished = True
 
             self.timer.cancel()
+
+    def log_current_state(self):
+        mission_elapsed = (
+            self.get_clock().now() - self.mission_start_time
+        ).nanoseconds / 1e9
+
+        self.logger.log(
+            mission_elapsed,
+            self.state,
+
+            self.current_x,
+            self.current_y,
+            self.current_z,
+
+            self.current_vx,
+            self.current_vy,
+            self.current_vz,
+
+            self.commanded_pitch,
+
+            self.current_roll,
+            self.current_pitch,
+            self.current_yaw,
+        )
 
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
@@ -406,6 +450,21 @@ class Transition2Mission(Node):
 
         pitch_rad = math.radians(pitch_deg)
 
+        # Pitch 증가에 따른 수직 추력 감소 보상
+        cos_pitch = math.cos(pitch_rad)
+
+        if abs(cos_pitch) > 0.1:
+            compensated_thrust = (
+                self.hover_thrust / abs(cos_pitch)
+            )
+        else:
+            compensated_thrust = self.max_transition_thrust
+
+        compensated_thrust = min(
+            compensated_thrust,
+            self.max_transition_thrust,
+        )
+
         # Roll = 0, Yaw = 0, Pitch only
         half_pitch = pitch_rad / 2.0
 
@@ -420,7 +479,7 @@ class Transition2Mission(Node):
         msg.thrust_body = [
             0.0,
             0.0,
-            -self.hover_thrust,
+            -compensated_thrust,
         ]
 
         self.attitude_setpoint_pub.publish(msg)
