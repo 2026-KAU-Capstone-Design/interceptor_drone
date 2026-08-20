@@ -280,36 +280,44 @@
       </sensor>
 
       <!-- ROCKET_DRONE_UPWARD_CAMERA -->
-      <!-- Global-shutter camera simulation for target detection -->
-      <sensor name="rocket_front_up_camera" type="camera">
+      <!--
+        Rocket Drone global-shutter camera simulation
+        Optical specification matched to team mono_cam.
+        Mounting angle remains 35 deg upward for interceptor mission.
+      -->
+      <sensor name="imager" type="camera">
 
-        <!-- 30 Hz camera -->
         <update_rate>30</update_rate>
 
-        <!-- Camera position relative to base_link
-             x = front, y = center, z = upper side
-             pitch = -35 deg (upward looking) -->
+        <!--
+          Position relative to base_link
+          x = front
+          y = center
+          z = upper side
+          pitch = -35 deg (upward looking)
+        -->
         <pose>0.18 0 0.12 0 -0.6109 0</pose>
 
         <camera>
-          <!-- Approx. 90 deg horizontal FOV -->
-          <horizontal_fov>1.5708</horizontal_fov>
+          <!-- Team mono_cam HFOV: 1.74 rad (~99.7 deg) -->
+          <horizontal_fov>1.74</horizontal_fov>
 
           <image>
             <width>1280</width>
-            <height>720</height>
+            <height>960</height>
             <format>R8G8B8</format>
           </image>
 
           <clip>
             <near>0.1</near>
-            <far>300</far>
+            <far>3000</far>
           </clip>
         </camera>
 
         <always_on>true</always_on>
         <visualize>true</visualize>
 
+        <!-- Keep current topic during integration -->
         <topic>/rocket_drone/camera/image</topic>
 
       </sensor>
