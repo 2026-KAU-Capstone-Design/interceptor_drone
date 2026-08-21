@@ -95,12 +95,12 @@
 
     <!-- ★ 적 UAV 표적 : PX4 standard_vtol ★ -->
     <!-- Gazebo ENU: X=동(드론 정면), Y=북, Z=위 -->
-    <!-- 초기 위치: 드론 전방 9m, 고도 3.5m -->
+    <!-- 초기 위치: 드론 전방 8m, 고도 8m -->
     <include>
       <uri>model://standard_vtol</uri>
       <name>target_uav</name>
       <static>true</static>
-      <pose>8 0 6 0 0 3.14159</pose>
+      <pose>8 0 8 0 0 3.14159</pose>
     </include>
 
     <!-- 보통풍 ~5.4 m/s -->
