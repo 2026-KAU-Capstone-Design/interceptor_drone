@@ -77,6 +77,7 @@ class RocketTrackMission(Node):
 
         self.state = "INIT"
         self.near_2m = False
+        self.lock_on = False
         self.offboard_setpoint_counter = 0
         self.hover_start_time = None
 
@@ -86,9 +87,14 @@ class RocketTrackMission(Node):
         self.yaw_initialized = False
          # Vertical tracking
         self.target_z = self.flight_altitude
-        self.kp_z = 0.25
-        self.max_z_step = 0.05
-        self.z_deadband_px = 30.0
+        # Vertical tracking
+        self.kp_z_track = 1.0
+        self.max_z_rate_track = 0.35
+
+        self.kp_z_approach = 0.6
+        self.max_z_rate_approach = 0.25
+
+        self.z_deadband_px = 40.0
 
         # PX4 NED altitude limits
         self.min_target_z = -10.0
@@ -164,6 +170,13 @@ class RocketTrackMission(Node):
             self.near_2m_callback,
             10,
         )
+ 
+        self.create_subscription(
+            Bool,
+            "/target/lock_on",
+            self.lock_on_callback,
+            10,
+        )
         # 20 Hz control loop
         self.timer = self.create_timer(
             0.05,
@@ -225,6 +238,9 @@ class RocketTrackMission(Node):
             )
     def near_2m_callback(self, msg):
         self.near_2m = bool(msg.data)
+
+    def lock_on_callback(self, msg):
+        self.lock_on = bool(msg.data)
 
     def bbox_callback(self, msg):
 
@@ -473,13 +489,13 @@ class RocketTrackMission(Node):
                 )
 
                 z_step = (
-                    self.kp_z * normalized_dy
+                    self.kp_z_track * normalized_dy
                 )
 
                 z_step = max(
-                    -self.max_z_step,
+                    -self.max_z_rate_track,
                     min(
-                        self.max_z_step,
+                        self.max_z_rate_track,
                         z_step,
                     ),
                 )
@@ -487,7 +503,7 @@ class RocketTrackMission(Node):
             # PX4 NED:
             # target_z 증가 = 하강
             # target_z 감소 = 상승
-            self.target_z += z_step
+            self.target_z += z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
@@ -528,13 +544,200 @@ class RocketTrackMission(Node):
             # Yaw locked -> start approach
             # --------------------------------------------------------
 
-            if abs(dx) <= self.approach_lock_px:
+            if self.lock_on:
 
                 self.state = "APPROACH"
 
                 self.get_logger().info(
-                    "Yaw aligned -> APPROACH"
+                    "Target lock-on -> APPROACH"
                 )
+
+            elif abs(dx) <= 100.0:
+
+                self.state = "COARSE_APPROACH"
+
+                self.get_logger().info(
+                    "Yaw roughly aligned -> COARSE_APPROACH"
+                )        
+                
+        # ------------------------------------------------------------
+        # COARSE APPROACH
+        # ------------------------------------------------------------
+        elif self.state == "COARSE_APPROACH":
+
+            # --------------------------------------------------------
+            # Detection lost
+            # --------------------------------------------------------
+            if not self.detected:
+
+                self.miss_count += 1
+
+                self.publish_approach_setpoint(
+                    0.0,
+                    0.0,
+                    self.target_z,
+                    self.target_yaw,
+                )
+
+                if self.miss_count >= self.miss_limit:
+
+                    self.state = "WAIT_TARGET"
+
+                    self.get_logger().warn(
+                        "Target lost -> WAIT_TARGET"
+                    )
+
+                return
+
+            self.miss_count = 0
+
+            # --------------------------------------------------------
+            # Wait for a new YOLO frame
+            # --------------------------------------------------------
+            if not self.new_bbox:
+
+                self.publish_approach_setpoint(
+                    0.0,
+                    0.0,
+                    self.target_z,
+                    self.target_yaw,
+                )
+
+                return
+
+            self.new_bbox = False
+
+            dx = self.bbox_dx
+            dy = self.bbox_dy
+
+            # --------------------------------------------------------
+            # Full lock acquired -> normal approach
+            # --------------------------------------------------------
+            if self.lock_on:
+
+                self.state = "APPROACH"
+
+                self.get_logger().info(
+                    "Target lock-on -> APPROACH"
+                )
+
+                return
+
+            # --------------------------------------------------------
+            # Target moved too far horizontally -> yaw tracking
+            # --------------------------------------------------------
+            if abs(dx) > 150.0:
+
+                self.state = "YAW_TRACK"
+
+                self.get_logger().info(
+                    "Yaw error increased -> YAW_TRACK"
+                )
+
+                return
+
+            # --------------------------------------------------------
+            # Yaw correction
+            # --------------------------------------------------------
+            if abs(dx) <= self.yaw_deadband_px:
+
+                yaw_rate = 0.0
+
+            else:
+
+                normalized_dx = (
+                    dx / (self.image_w / 2.0)
+                )
+
+                yaw_rate = (
+                    self.kp_yaw * normalized_dx
+                )
+
+                yaw_rate = max(
+                    -self.max_yaw_rate,
+                    min(
+                        self.max_yaw_rate,
+                        yaw_rate,
+                    ),
+                )
+
+            self.target_yaw += (
+                yaw_rate * self.control_dt
+            )
+
+            self.target_yaw = math.atan2(
+                math.sin(self.target_yaw),
+                math.cos(self.target_yaw),
+            )
+
+            # --------------------------------------------------------
+            # Vertical correction
+            # --------------------------------------------------------
+            if abs(dy) <= self.z_deadband_px:
+
+                z_rate = 0.0
+
+            else:
+
+                normalized_dy = (
+                    dy / (self.image_h / 2.0)
+                )
+
+                z_rate = (
+                    self.kp_z_track * normalized_dy
+                )
+
+                z_rate = max(
+                    -self.max_z_rate_track,
+                    min(
+                        self.max_z_rate_track,
+                        z_rate,
+                    ),
+                )
+
+            self.target_z += (
+                z_rate * self.control_dt
+            )
+
+            self.target_z = max(
+                self.min_target_z,
+                min(
+                    self.max_target_z,
+                    self.target_z,
+                ),
+            )
+
+            # --------------------------------------------------------
+            # Slow forward approach before full lock
+            # --------------------------------------------------------
+            coarse_speed = 0.4
+
+            vx = (
+                coarse_speed
+                * math.cos(self.target_yaw)
+            )
+
+            vy = (
+                coarse_speed
+                * math.sin(self.target_yaw)
+            )
+
+            self.publish_approach_setpoint(
+                vx,
+                vy,
+                self.target_z,
+                self.target_yaw,
+            )
+
+            self.get_logger().info(
+                f"[COARSE_APPROACH] "
+                f"dx={dx:+.1f}px | "
+                f"dy={dy:+.1f}px | "
+                f"yaw_rate={yaw_rate:+.3f}rad/s | "
+                f"speed={coarse_speed:.2f} | "
+                f"yaw_sp={math.degrees(self.target_yaw):+.1f}deg | "
+                f"z_sp={self.target_z:+.2f}m"
+            )
         # ------------------------------------------------------------
         # APPROACH
         # ------------------------------------------------------------
@@ -655,18 +858,18 @@ class RocketTrackMission(Node):
                 )
 
                 z_step = (
-                    self.kp_z * normalized_dy
+                    self.kp_z_approach * normalized_dy
                 )
 
                 z_step = max(
-                    -self.max_z_step,
+                    -self.max_z_rate_approach,
                     min(
-                        self.max_z_step,
+                        self.max_z_rate_approach,
                         z_step,
                     ),
                 )
 
-            self.target_z += z_step
+            self.target_z += z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
@@ -682,11 +885,11 @@ class RocketTrackMission(Node):
             # Horizontal error based forward-speed control
             abs_dx = abs(dx)
 
-            if abs_dx <= 60.0:
+            if abs_dx <= 40.0:
                 # Target near center -> normal approach
                 forward_speed = self.approach_speed
 
-            elif abs_dx <= 150.0:
+            elif abs_dx <= 100.0:
                 # Moderate error -> slow approach
                 forward_speed = 0.4
 
