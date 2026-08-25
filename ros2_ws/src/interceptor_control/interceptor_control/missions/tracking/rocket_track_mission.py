@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
@@ -12,6 +13,7 @@ from rclpy.qos import (
 )
 
 from std_msgs.msg import Float32MultiArray, Bool
+from interceptor_control.missions.tracking.rocket_track_logger import RocketTrackLogger
 
 from px4_msgs.msg import (
     OffboardControlMode,
@@ -42,10 +44,10 @@ class RocketTrackMission(Node):
         self.image_h = 960.0
 
         # dx normalized error -> yaw rate
-        self.kp_yaw = 0.8
+        self.kp_yaw = 1.0
 
         # Maximum yaw rate [rad/s]
-        self.max_yaw_rate = 0.6
+        self.max_yaw_rate = 1.0
 
         # Center deadband [pixel]
         self.yaw_deadband_px = 30.0
@@ -100,11 +102,29 @@ class RocketTrackMission(Node):
         self.min_target_z = -10.0
         self.max_target_z = -2.5
         # Approach control
-        self.approach_speed = 1.0
+        self.approach_speed = 4.0
         self.approach_lock_px = 40.0
        
         # Control period = 20 Hz
         self.control_dt = 0.05
+        # ============================================================
+        # Mission Logger
+        # ============================================================
+
+        workspace_path = (
+            Path.home()
+            / "Documents"
+            / "interceptor_drone"
+            / "ros2_ws"
+        )
+
+        self.mission_logger = RocketTrackLogger(
+            str(workspace_path)
+        )
+
+        # ============================================================
+        # QoS
+        # ============================================================
         # ============================================================
         # QoS
         # ============================================================
@@ -269,6 +289,8 @@ class RocketTrackMission(Node):
         if not self.yaw_initialized:
             return
 
+        log_time = self.get_clock().now().nanoseconds / 1e9
+        
         self.publish_offboard_control_mode(
             position=True,
             velocity=True,
@@ -429,10 +451,13 @@ class RocketTrackMission(Node):
                     self.get_logger().warn(
                         "Target lost -> WAIT_TARGET"
                     )
+                    self.mission_logger.mark_target_lost()
 
                 return
 
             self.miss_count = 0
+
+
 
             if not self.new_bbox:
                 self.publish_position_setpoint(
@@ -503,7 +528,7 @@ class RocketTrackMission(Node):
             # PX4 NED:
             # target_z 증가 = 하강
             # target_z 감소 = 상승
-            self.target_z += z_step * self.control_dt
+            self.target_z -= z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
@@ -523,12 +548,36 @@ class RocketTrackMission(Node):
                 math.cos(self.target_yaw),
             )
 
-            # Hold XYZ position, change Yaw only
-            self.publish_position_setpoint(
-                0.0,
-                0.0,
+            # --------------------------------------------------------
+            # Forward chase during YAW_TRACK
+            # --------------------------------------------------------
+            abs_dx = abs(dx)
+
+            if abs_dx <= 40.0:
+                track_speed = 3.0
+            elif abs_dx <= 100.0:
+                track_speed = 2.0
+            elif abs_dx <= 200.0:
+                track_speed = 1.0
+            else:
+                # Large yaw error -> rotate first
+                track_speed = 0.0
+
+            vx = (
+                track_speed
+                * math.cos(self.target_yaw)
+            )
+
+            vy = (
+                track_speed
+                * math.sin(self.target_yaw)
+            )
+
+            self.publish_approach_setpoint(
+                vx,
+                vy,
                 self.target_z,
-                yaw=self.target_yaw,
+                self.target_yaw,
             )
 
             self.get_logger().info(
@@ -536,10 +585,30 @@ class RocketTrackMission(Node):
                 f"dx={dx:+.1f}px | "
                 f"dy={dy:+.1f}px | "
                 f"yaw_rate={yaw_rate:+.3f}rad/s | "
+                f"speed={track_speed:.2f}m/s | "
                 f"yaw_sp={math.degrees(self.target_yaw):+.1f}deg | "
                 f"z_sp={self.target_z:+.2f}m"
             )
 
+            self.mission_logger.log(
+                log_time,
+                self.state,
+                self.detected,
+                self.lock_on,
+                self.near_2m,
+                self.current_x,
+                self.current_y,
+                self.current_z,
+                dx,
+                dy,
+                self.current_yaw,
+                self.target_yaw,
+                self.target_z,
+                yaw_rate=yaw_rate,
+                forward_speed=track_speed,
+                vx=vx,
+                vy=vy,
+            )
             # --------------------------------------------------------
             # Yaw locked -> start approach
             # --------------------------------------------------------
@@ -586,6 +655,7 @@ class RocketTrackMission(Node):
                     self.get_logger().warn(
                         "Target lost -> WAIT_TARGET"
                     )
+                    self.mission_logger.mark_target_lost()
 
                 return
 
@@ -695,7 +765,7 @@ class RocketTrackMission(Node):
                     ),
                 )
 
-            self.target_z += (
+            self.target_z -= (
                 z_rate * self.control_dt
             )
 
@@ -710,7 +780,7 @@ class RocketTrackMission(Node):
             # --------------------------------------------------------
             # Slow forward approach before full lock
             # --------------------------------------------------------
-            coarse_speed = 0.4
+            coarse_speed = 3.0
 
             vx = (
                 coarse_speed
@@ -738,6 +808,26 @@ class RocketTrackMission(Node):
                 f"yaw_sp={math.degrees(self.target_yaw):+.1f}deg | "
                 f"z_sp={self.target_z:+.2f}m"
             )
+            
+            self.mission_logger.log(
+                log_time,
+                self.state,
+                self.detected,
+                self.lock_on,
+                self.near_2m,
+                self.current_x,
+                self.current_y,
+                self.current_z,
+                dx,
+                dy,
+                self.current_yaw,
+                self.target_yaw,
+                self.target_z,
+                yaw_rate=yaw_rate,
+                forward_speed=coarse_speed,
+                vx=vx,
+                vy=vy,
+            )
         # ------------------------------------------------------------
         # APPROACH
         # ------------------------------------------------------------
@@ -757,6 +847,7 @@ class RocketTrackMission(Node):
                 self.get_logger().info(
                     "[INTERCEPT] Target within 2 m -> STOP"
                 )
+                self.mission_logger.mark_intercept()
 
                 return
             # --------------------------------------------------------
@@ -781,6 +872,7 @@ class RocketTrackMission(Node):
                     self.get_logger().warn(
                         "Target lost -> WAIT_TARGET"
                     )
+                    self.mission_logger.mark_target_lost()
 
                 return
 
@@ -869,7 +961,7 @@ class RocketTrackMission(Node):
                     ),
                 )
 
-            self.target_z += z_step * self.control_dt
+            self.target_z -= z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
@@ -926,6 +1018,27 @@ class RocketTrackMission(Node):
                 f"yaw_sp={math.degrees(self.target_yaw):+.1f}deg | "
                 f"z_sp={self.target_z:+.2f}m"
             )
+
+            self.mission_logger.log(
+                log_time,
+                self.state,
+                self.detected,
+                self.lock_on,
+                self.near_2m,
+                self.current_x,
+                self.current_y,
+                self.current_z,
+                dx,
+                dy,
+                self.current_yaw,
+                self.target_yaw,
+                self.target_z,
+                yaw_rate=yaw_rate,
+                forward_speed=forward_speed,
+                vx=vx,
+                vy=vy,
+            )
+
         elif self.state == "INTERCEPT":
 
             self.publish_approach_setpoint(
@@ -1139,9 +1252,11 @@ def main(args=None):
 
     finally:
 
+        node.mission_logger.close()
         node.destroy_node()
-        rclpy.shutdown()
 
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
