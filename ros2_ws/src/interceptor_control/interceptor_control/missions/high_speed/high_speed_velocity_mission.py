@@ -32,7 +32,7 @@ class HighSpeedVelocityMission(Node):
         # High-Speed Mission Parameters
         self.flight_altitude = -5.0
 
-        self.target_speed = 5.0
+        self.target_speed = 10.0
         self.flight_distance = 30.0
 
         self.accel_distance = 5.0
@@ -243,13 +243,25 @@ class HighSpeedVelocityMission(Node):
                         min(1.0, 0.8 * altitude_error),
                     )
 
-                self.publish_velocity_setpoint(
-                    commanded_vx,
-                    commanded_vy,
-                    commanded_vz,
-                    yaw=0.0,
-                )
+                if self.state in [
+                    "ACCELERATE",
+                    "CRUISE",
+                    "DECELERATE",
+                ]:
+                    self.publish_high_speed_setpoint(
+                        commanded_vx,
+                        commanded_vy,
+                        self.flight_altitude,
+                        yaw=0.0,
+                    )
 
+                else:  # RETURN_HOME
+                    self.publish_velocity_setpoint(
+                        commanded_vx,
+                        commanded_vy,
+                        commanded_vz,
+                        yaw=0.0,
+                    )
             else:
                 self.publish_position_setpoint(
                     target_x,
@@ -311,7 +323,7 @@ class HighSpeedVelocityMission(Node):
                 self.get_clock().now() - self.cruise_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 4.0:
+            if elapsed >= 8.0:
                 self.get_logger().info("Cruise complete. Decelerating...")
                 self.decel_start_time = self.get_clock().now()
                 self.state = "DECELERATE"
@@ -400,10 +412,14 @@ class HighSpeedVelocityMission(Node):
             "ACCELERATE",
             "CRUISE",
             "DECELERATE",
-            "RETURN_HOME",
         ]:
+            msg.position = True
+            msg.velocity = False
+
+        elif self.state == "RETURN_HOME":
             msg.position = False
             msg.velocity = True
+
         else:
             msg.position = True
             msg.velocity = False
@@ -420,6 +436,27 @@ class HighSpeedVelocityMission(Node):
         msg.position = [float(x), float(y), float(z)]
         msg.yaw = 0.0
         self.trajectory_setpoint_pub.publish(msg)
+
+    def publish_high_speed_setpoint(self, vx, vy, z, yaw=0.0):
+        msg = TrajectorySetpoint()
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+        msg.position = [
+            float("nan"),
+            float("nan"),
+            float(z),
+        ]
+
+        msg.velocity = [
+            float(vx),
+            float(vy),
+            float("nan"),
+        ]
+
+        msg.yaw = float(yaw)
+
+        self.trajectory_setpoint_pub.publish(msg)
+
 
     def publish_velocity_setpoint(self, vx, vy, vz, yaw=0.0):
         msg = TrajectorySetpoint()
