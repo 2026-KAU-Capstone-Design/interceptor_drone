@@ -13,6 +13,7 @@ from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleAttitude
+from px4_msgs.msg import VehicleAttitudeSetpoint
 
 from interceptor_control.missions.high_speed.high_speed_logger import HighSpeedLogger
 
@@ -33,7 +34,16 @@ class HighSpeedVelocityMission(Node):
         self.flight_altitude = -5.0
 
         self.target_speed = 30.0
+        # Transition Flight Parameters
+        self.transition_pitch_deg = -30.0
+        self.hover_thrust = 0.60
+        self.transition_duration = 1.0
 
+        self.transition_kp_z = 0.10
+        self.transition_kd_z = 0.05
+
+        self.transition_min_thrust = 0.50
+        self.transition_max_thrust = 0.95
         # Transition test
         self.transition_accel_ff = 2.5
 
@@ -47,6 +57,7 @@ class HighSpeedVelocityMission(Node):
 
         self.offboard_setpoint_counter = 0
         self.hold_start_time = None
+        self.transition_start_time = None
         self.mission_start_time = self.get_clock().now()
         self.finished = False
         self.disarm_sent = False
@@ -86,6 +97,12 @@ class HighSpeedVelocityMission(Node):
         self.trajectory_setpoint_pub = self.create_publisher(
             TrajectorySetpoint,
             '/fmu/in/trajectory_setpoint',
+            10
+        )
+
+        self.vehicle_attitude_setpoint_pub = self.create_publisher(
+            VehicleAttitudeSetpoint,
+            '/fmu/in/vehicle_attitude_setpoint',
             10
         )
 
@@ -184,7 +201,12 @@ class HighSpeedVelocityMission(Node):
         if self.state != "END":
             self.publish_offboard_control_mode()
 
-            if self.state in [
+            if self.state == "TRANSITION":
+                self.publish_transition_attitude_setpoint(
+                    self.transition_pitch_deg
+                )
+
+            elif self.state in [
                 "ACCELERATE",
                 "CRUISE",
                 "DECELERATE",
@@ -334,7 +356,21 @@ class HighSpeedVelocityMission(Node):
             ).nanoseconds / 1e9
 
             if elapsed >= 8.0:
-                self.get_logger().info("Cruise complete. Decelerating...")
+                self.get_logger().info(
+                    "Cruise complete. Starting attitude transition..."
+                )
+                self.transition_start_time = self.get_clock().now()
+                self.state = "TRANSITION"
+
+        elif self.state == "TRANSITION":
+            elapsed = (
+                self.get_clock().now() - self.transition_start_time
+            ).nanoseconds / 1e9
+
+            if elapsed >= self.transition_duration:
+                self.get_logger().info(
+                    "Transition complete. Decelerating..."
+                )
                 self.decel_start_time = self.get_clock().now()
                 self.state = "DECELERATE"
 
@@ -344,7 +380,9 @@ class HighSpeedVelocityMission(Node):
             ).nanoseconds / 1e9
 
             if elapsed >= 6.0:
-                self.get_logger().info("Deceleration complete. Returning home...")
+                self.get_logger().info(
+                    "Deceleration complete. Returning home..."
+                )
                 self.state = "RETURN_HOME"
 
         elif self.state == "RETURN_HOME":
@@ -418,25 +456,32 @@ class HighSpeedVelocityMission(Node):
         msg = OffboardControlMode()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
 
-        if self.state in [
+        # Default: all control modes disabled
+        msg.position = False
+        msg.velocity = False
+        msg.acceleration = False
+        msg.attitude = False
+        msg.body_rate = False
+
+        # Attitude-based transition flight
+        if self.state == "TRANSITION":
+            msg.attitude = True
+
+        # High-speed velocity control + altitude position control
+        elif self.state in [
             "ACCELERATE",
             "CRUISE",
             "DECELERATE",
         ]:
             msg.position = True
-            msg.velocity = False
 
+        # Return home using velocity control
         elif self.state == "RETURN_HOME":
-            msg.position = False
             msg.velocity = True
 
+        # TAKEOFF / HOLD / DESCEND etc.
         else:
             msg.position = True
-            msg.velocity = False
-
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
 
         self.offboard_control_mode_pub.publish(msg)
 
@@ -446,6 +491,7 @@ class HighSpeedVelocityMission(Node):
         msg.position = [float(x), float(y), float(z)]
         msg.yaw = 0.0
         self.trajectory_setpoint_pub.publish(msg)
+
 
     def publish_high_speed_setpoint(
         self,
@@ -482,7 +528,51 @@ class HighSpeedVelocityMission(Node):
         msg.yaw = float(yaw)
 
         self.trajectory_setpoint_pub.publish(msg)
+    def publish_transition_attitude_setpoint(self, pitch_deg):
+        msg = VehicleAttitudeSetpoint()
 
+        msg.timestamp = int(
+            self.get_clock().now().nanoseconds / 1000
+        )
+
+        pitch_rad = math.radians(pitch_deg)
+
+        # roll = 0, yaw = 0, pitch only
+        msg.q_d = [
+            math.cos(pitch_rad / 2.0),
+            0.0,
+            math.sin(pitch_rad / 2.0),
+            0.0,
+        ]
+
+        # Tilt compensation
+        cos_pitch = max(0.2, math.cos(abs(pitch_rad)))
+        thrust_mag = self.hover_thrust / cos_pitch
+
+        # Altitude compensation (NED)
+        altitude_error = self.current_z - self.flight_altitude
+
+        thrust_mag += (
+            self.transition_kp_z * altitude_error
+            + self.transition_kd_z * self.current_vz
+        )
+
+        thrust_mag = max(
+            self.transition_min_thrust,
+            min(self.transition_max_thrust, thrust_mag),
+        )
+
+        msg.thrust_body = [
+            0.0,
+            0.0,
+            -float(thrust_mag),
+        ]
+
+        msg.yaw_sp_move_rate = 0.0
+        msg.reset_integral = False
+        msg.fw_control_yaw_wheel = False
+
+        self.vehicle_attitude_setpoint_pub.publish(msg)
 
     def publish_velocity_setpoint(self, vx, vy, vz, yaw=0.0):
         msg = TrajectorySetpoint()
