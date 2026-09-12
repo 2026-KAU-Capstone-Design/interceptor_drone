@@ -368,8 +368,15 @@ class YoloLiveDetector(Node):
             best["box_h"],
         )
 
+        # Horizontal error: image center
         dx = scx - image_cx
-        dy = scy - image_cy
+
+        # Camera is tilted upward about 35 deg.
+        # Desired target position is 100 px below image center.
+        target_cy = image_cy + 100.0
+
+        # Vertical error relative to desired target position
+        dy = scy - target_cy
 
         lock_on = self.update_lock_on(True, dx, dy)
 

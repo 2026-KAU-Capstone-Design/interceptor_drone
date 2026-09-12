@@ -44,7 +44,7 @@ class RocketTrackMission(Node):
         self.image_h = 960.0
 
         # dx normalized error -> yaw rate
-        self.kp_yaw = 1.0
+        self.kp_yaw = 0.8
 
         # Maximum yaw rate [rad/s]
         self.max_yaw_rate = 1.0
@@ -302,6 +302,9 @@ class RocketTrackMission(Node):
 
         if self.offboard_setpoint_counter < 20:
 
+            # Offboard 진입 전에는 현재 기체 방향을 계속 따라감
+            self.target_yaw = self.current_yaw
+
             self.publish_position_setpoint(
                 0.0,
                 0.0,
@@ -314,6 +317,14 @@ class RocketTrackMission(Node):
             return
 
         if self.offboard_setpoint_counter == 20:
+
+            # Target UAV is located in Gazebo +X direction
+            self.target_yaw = math.radians(90.0)
+
+            self.get_logger().info(
+                f"Takeoff yaw locked: "
+                f"{math.degrees(self.target_yaw):+.1f} deg"
+            )
 
             self.engage_offboard_mode()
             self.arm()
@@ -528,7 +539,7 @@ class RocketTrackMission(Node):
             # PX4 NED:
             # target_z 증가 = 하강
             # target_z 감소 = 상승
-            self.target_z -= z_step * self.control_dt
+            self.target_z += z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
@@ -551,14 +562,25 @@ class RocketTrackMission(Node):
             # --------------------------------------------------------
             # Forward chase during YAW_TRACK
             # --------------------------------------------------------
+            # --------------------------------------------------------
+            # Forward chase during YAW_TRACK
+            # --------------------------------------------------------
             abs_dx = abs(dx)
+            abs_dy = abs(dy)
 
-            if abs_dx <= 40.0:
+            # Vertical alignment first
+            if abs_dy > 150.0:
+                track_speed = 0.0
+
+            elif abs_dx <= 40.0:
                 track_speed = 3.0
+
             elif abs_dx <= 100.0:
                 track_speed = 2.0
+
             elif abs_dx <= 200.0:
                 track_speed = 1.0
+
             else:
                 # Large yaw error -> rotate first
                 track_speed = 0.0
@@ -621,14 +643,17 @@ class RocketTrackMission(Node):
                     "Target lock-on -> APPROACH"
                 )
 
-            elif abs(dx) <= 100.0:
+            elif (
+                abs(dx) <= 100.0
+                and abs(dy) <= 150.0
+            ):
 
                 self.state = "COARSE_APPROACH"
 
                 self.get_logger().info(
-                    "Yaw roughly aligned -> COARSE_APPROACH"
-                )        
-                
+                    "Yaw/altitude roughly aligned "
+                    "-> COARSE_APPROACH"
+                )
         # ------------------------------------------------------------
         # COARSE APPROACH
         # ------------------------------------------------------------
@@ -765,7 +790,7 @@ class RocketTrackMission(Node):
                     ),
                 )
 
-            self.target_z -= (
+            self.target_z += (
                 z_rate * self.control_dt
             )
 
@@ -780,7 +805,7 @@ class RocketTrackMission(Node):
             # --------------------------------------------------------
             # Slow forward approach before full lock
             # --------------------------------------------------------
-            coarse_speed = 3.0
+            coarse_speed = 1.5
 
             vx = (
                 coarse_speed
@@ -961,7 +986,7 @@ class RocketTrackMission(Node):
                     ),
                 )
 
-            self.target_z -= z_step * self.control_dt
+            self.target_z += z_step * self.control_dt
 
             self.target_z = max(
                 self.min_target_z,
