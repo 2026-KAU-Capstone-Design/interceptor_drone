@@ -32,7 +32,11 @@ class HighSpeedVelocityMission(Node):
         # High-Speed Mission Parameters
         self.flight_altitude = -5.0
 
-        self.target_speed = 20.0
+        self.target_speed = 30.0
+
+        # Transition test
+        self.transition_accel_ff = 2.5
+
         self.flight_distance = 30.0
 
         self.accel_distance = 5.0
@@ -189,6 +193,7 @@ class HighSpeedVelocityMission(Node):
                 commanded_vx = 0.0
                 commanded_vy = 0.0
                 commanded_vz = 0.0
+                commanded_ax = 0.0
 
                 if self.state == "ACCELERATE":
                     elapsed = (
@@ -197,11 +202,15 @@ class HighSpeedVelocityMission(Node):
 
                     commanded_vx = min(
                         self.target_speed,
-                        self.target_speed * elapsed / 4.0,
+                        self.target_speed * elapsed / 6.0,
                     )
 
                 elif self.state == "CRUISE":
                     commanded_vx = self.target_speed
+
+                    # Forward acceleration feed-forward
+                    # to increase forward thrust / pitch
+                    commanded_ax = self.transition_accel_ff
 
                 elif self.state == "DECELERATE":
                     elapsed = (
@@ -210,7 +219,7 @@ class HighSpeedVelocityMission(Node):
 
                     commanded_vx = max(
                         0.0,
-                        self.target_speed * (1.0 - elapsed / 4.0),
+                        self.target_speed * (1.0 - elapsed / 6.0),
                     )
 
                 else:  # RETURN_HOME
@@ -252,6 +261,7 @@ class HighSpeedVelocityMission(Node):
                         commanded_vx,
                         commanded_vy,
                         self.flight_altitude,
+                        ax=commanded_ax,
                         yaw=0.0,
                     )
 
@@ -313,7 +323,7 @@ class HighSpeedVelocityMission(Node):
                 self.get_clock().now() - self.high_speed_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 4.0:
+            if elapsed >= 6.0:
                 self.get_logger().info("Acceleration complete. Cruising...")
                 self.cruise_start_time = self.get_clock().now()
                 self.state = "CRUISE"
@@ -333,7 +343,7 @@ class HighSpeedVelocityMission(Node):
                 self.get_clock().now() - self.decel_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 4.0:
+            if elapsed >= 6.0:
                 self.get_logger().info("Deceleration complete. Returning home...")
                 self.state = "RETURN_HOME"
 
@@ -437,9 +447,19 @@ class HighSpeedVelocityMission(Node):
         msg.yaw = 0.0
         self.trajectory_setpoint_pub.publish(msg)
 
-    def publish_high_speed_setpoint(self, vx, vy, z, yaw=0.0):
+    def publish_high_speed_setpoint(
+        self,
+        vx,
+        vy,
+        z,
+        ax=0.0,
+        yaw=0.0,
+    ):
         msg = TrajectorySetpoint()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+        msg.timestamp = int(
+            self.get_clock().now().nanoseconds / 1000
+        )
 
         msg.position = [
             float("nan"),
@@ -450,6 +470,12 @@ class HighSpeedVelocityMission(Node):
         msg.velocity = [
             float(vx),
             float(vy),
+            float("nan"),
+        ]
+
+        msg.acceleration = [
+            float(ax),
+            0.0,
             float("nan"),
         ]
 

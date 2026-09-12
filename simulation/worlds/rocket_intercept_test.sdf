@@ -105,7 +105,7 @@
 
     <!-- 보통풍 ~5.4 m/s -->
     <wind>
-      <linear_velocity>5 2 0</linear_velocity>
+      <linear_velocity>0 0 0</linear_velocity>
     </wind>
 
     <spherical_coordinates>
