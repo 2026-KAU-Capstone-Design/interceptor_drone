@@ -35,15 +35,45 @@ class HighSpeedVelocityMission(Node):
 
         self.target_speed = 30.0
         # Transition Flight Parameters
-        self.transition_pitch_deg = -30.0
+        self.transition_pitch_deg = -50.0
         self.hover_thrust = 0.60
-        self.transition_duration = 1.0
+        self.transition_base_thrust = 0.93
+        self.transition_duration = 4.5
+
+        self.transition_recover_duration = 1.0
+        self.pre_transition_pitch_deg = 0.0
+        self.transition_recover_start_time = None
+
+        self.decel_start_vy = 0.0
+        self.decel_vy_recover_duration = 1.5
+
+        # Pre-flight stabilization parameters
+        self.stabilize_duration = 2.0
+
+        self.stabilize_roll_limit = 5.0
+        self.stabilize_pitch_limit = 5.0
+        self.stabilize_yaw_limit = 5.0
+        self.stabilize_xy_speed_limit = 0.3
+
+        self.stabilize_ok_start_time = None
+        self.stabilize_log_counter = 0
+
+        # High-speed test mode
+        # True  : 고속 시험 후 현 위치 착륙
+        # False : 기존처럼 원점 복귀 후 착륙
+        self.test_mode = True
+
+        self.land_x = 0.0
+        self.land_y = 0.0
+
+        self.brake_hold_duration = 2.0
+        self.brake_hold_start_time = None
 
         self.transition_kp_z = 0.10
-        self.transition_kd_z = 0.05
+        self.transition_kd_z = 0.10
 
         self.transition_min_thrust = 0.50
-        self.transition_max_thrust = 0.95
+        self.transition_max_thrust = 1.00
         # Transition test
         self.transition_accel_ff = 2.5
 
@@ -58,7 +88,9 @@ class HighSpeedVelocityMission(Node):
         self.offboard_setpoint_counter = 0
         self.hold_start_time = None
         self.transition_start_time = None
+        self.decel_start_time = None
         self.mission_start_time = self.get_clock().now()
+
         self.finished = False
         self.disarm_sent = False
 
@@ -72,6 +104,7 @@ class HighSpeedVelocityMission(Node):
         self.current_roll = 0.0
         self.current_pitch = 0.0
         self.current_yaw = 0.0
+        self.initial_yaw_rad = None
 
         self.state = "INIT"
 
@@ -170,7 +203,14 @@ class HighSpeedVelocityMission(Node):
         # Yaw
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        self.current_yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        
+        yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+
+        self.current_yaw = math.degrees(yaw_rad)
+
+        # Save initial yaw once
+        if self.initial_yaw_rad is None:
+            self.initial_yaw_rad = yaw_rad
 
     def vehicle_status_callback(self, msg):
         pass
@@ -203,7 +243,68 @@ class HighSpeedVelocityMission(Node):
 
             if self.state == "TRANSITION":
                 self.publish_transition_attitude_setpoint(
+                    self.transition_pitch_deg,
+                    base_thrust=self.transition_base_thrust,
+                )
+
+            elif self.state == "TRANSITION_RECOVER":
+                elapsed = (
+                    self.get_clock().now()
+                    - self.transition_recover_start_time
+                ).nanoseconds / 1e9
+
+                progress = min(
+                    1.0,
+                    elapsed / self.transition_recover_duration,
+                )
+
+                # -50 deg에서 천이 진입 직전 CRUISE pitch로
+                # 부드럽게 복귀
+                recover_pitch_deg = (
                     self.transition_pitch_deg
+                    + (
+                        self.pre_transition_pitch_deg
+                        - self.transition_pitch_deg
+                    )
+                    * progress
+                )
+
+                # 복귀 목표 pitch에서 고도 유지를 위한
+                # 기본 thrust 계산
+                recover_pitch_rad = math.radians(
+                    self.pre_transition_pitch_deg
+                )
+
+                recover_end_thrust = (
+                    self.hover_thrust
+                    / max(
+                        0.1,
+                        math.cos(recover_pitch_rad),
+                    )
+                )
+
+                recover_end_thrust = max(
+                    self.transition_min_thrust,
+                    min(
+                        self.transition_max_thrust,
+                        recover_end_thrust,
+                    ),
+                )
+
+                # Transition thrust → Cruise 자세용 thrust로
+                # 부드럽게 감소
+                recover_base_thrust = (
+                    self.transition_base_thrust
+                    + (
+                        recover_end_thrust
+                        - self.transition_base_thrust
+                    )
+                    * progress
+                )
+
+                self.publish_transition_attitude_setpoint(
+                    recover_pitch_deg,
+                    base_thrust=recover_base_thrust,
                 )
 
             elif self.state in [
@@ -241,7 +342,17 @@ class HighSpeedVelocityMission(Node):
 
                     commanded_vx = max(
                         0.0,
-                        self.target_speed * (1.0 - elapsed / 6.0),
+                        self.target_speed * (1.0 - elapsed / 8.0),
+                    )
+
+                    vy_progress = min(
+                        1.0,
+                        elapsed / self.decel_vy_recover_duration,
+                    )
+
+                    commanded_vy = (
+                        self.decel_start_vy
+                        * (1.0 - vy_progress)
                     )
 
                 else:  # RETURN_HOME
@@ -334,11 +445,83 @@ class HighSpeedVelocityMission(Node):
 
             if dist < self.acceptance_radius:
                 self.get_logger().info(
-                    "High-speed start point reached. Accelerating..."
+                    "High-speed start point reached. Stabilizing..."
                 )
 
-                self.high_speed_start_time = self.get_clock().now()
-                self.state = "ACCELERATE"
+                self.stabilize_ok_start_time = None
+                self.stabilize_log_counter = 0
+
+                self.state = "STABILIZE"
+
+        elif self.state == "STABILIZE":
+            xy_speed = math.sqrt(
+                self.current_vx ** 2
+                + self.current_vy ** 2
+            )
+
+            # Yaw error relative to world-frame 0 deg
+            yaw_error = (
+                (self.current_yaw + 180.0) % 360.0
+                - 180.0
+            )
+
+            is_stable = (
+                abs(self.current_roll)
+                <= self.stabilize_roll_limit
+                and abs(self.current_pitch)
+                <= self.stabilize_pitch_limit
+                and abs(yaw_error)
+                <= self.stabilize_yaw_limit
+                and xy_speed
+                <= self.stabilize_xy_speed_limit
+            )
+
+            # About once per second
+            self.stabilize_log_counter += 1
+
+            if self.stabilize_log_counter >= 20:
+                self.get_logger().info(
+                    f"Stabilizing | "
+                    f"Roll={self.current_roll:.2f} deg | "
+                    f"Pitch={self.current_pitch:.2f} deg | "
+                    f"Yaw={self.current_yaw:.2f} deg | "
+                    f"YawErr={yaw_error:.2f} deg | "
+                    f"XY Speed={xy_speed:.2f} m/s"
+                )
+
+                self.stabilize_log_counter = 0
+
+            if is_stable:
+                if self.stabilize_ok_start_time is None:
+                    self.stabilize_ok_start_time = (
+                        self.get_clock().now()
+                    )
+
+                    self.get_logger().info(
+                        "Stable condition detected. "
+                        "Holding for 2.0 seconds..."
+                    )
+
+                stable_elapsed = (
+                    self.get_clock().now()
+                    - self.stabilize_ok_start_time
+                ).nanoseconds / 1e9
+
+                if stable_elapsed >= self.stabilize_duration:
+                    self.get_logger().info(
+                        "Stabilization complete. Accelerating..."
+                    )
+
+                    self.high_speed_start_time = (
+                        self.get_clock().now()
+                    )
+
+                    self.state = "ACCELERATE"
+
+            else:
+                # 조건을 하나라도 벗어나면
+                # 2초 안정화 타이머 다시 시작
+                self.stabilize_ok_start_time = None
 
         elif self.state == "ACCELERATE":
             elapsed = (
@@ -359,6 +542,8 @@ class HighSpeedVelocityMission(Node):
                 self.get_logger().info(
                     "Cruise complete. Starting attitude transition..."
                 )
+                self.pre_transition_pitch_deg = self.current_pitch
+
                 self.transition_start_time = self.get_clock().now()
                 self.state = "TRANSITION"
 
@@ -369,21 +554,72 @@ class HighSpeedVelocityMission(Node):
 
             if elapsed >= self.transition_duration:
                 self.get_logger().info(
-                    "Transition complete. Decelerating..."
+                    "Transition complete. Recovering attitude..."
                 )
+
+                self.transition_recover_start_time = (
+                    self.get_clock().now()
+                )
+
+                self.state = "TRANSITION_RECOVER"
+
+        elif self.state == "TRANSITION_RECOVER":
+            elapsed = (
+                self.get_clock().now()
+                - self.transition_recover_start_time
+            ).nanoseconds / 1e9
+
+            if elapsed >= self.transition_recover_duration:
+                self.get_logger().info(
+                    "Attitude recovery complete. Decelerating..."
+                )
+
+                self.decel_start_vy = self.current_vy
                 self.decel_start_time = self.get_clock().now()
                 self.state = "DECELERATE"
 
         elif self.state == "DECELERATE":
             elapsed = (
-                self.get_clock().now() - self.decel_start_time
+                self.get_clock().now()
+                - self.decel_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 6.0:
+            if elapsed >= 8.0:
+                if self.test_mode:
+                    self.land_x = self.current_x
+                    self.land_y = self.current_y
+
+                    self.get_logger().info(
+                        f"Deceleration complete. "
+                        f"Test mode: holding at current position "
+                        f"({self.land_x:.2f}, {self.land_y:.2f})"
+                    )
+
+                    self.brake_hold_start_time = self.get_clock().now()
+                    self.state = "BRAKE_HOLD"
+
+                else:
+                    self.get_logger().info(
+                        "Deceleration complete. Returning home..."
+                    )
+                    self.state = "RETURN_HOME"
+
+        elif self.state == "BRAKE_HOLD":
+            elapsed = (
+                self.get_clock().now()
+                - self.brake_hold_start_time
+            ).nanoseconds / 1e9
+
+            self.get_logger().info(
+                f"Brake hold... {elapsed:.1f} / "
+                f"{self.brake_hold_duration:.1f} s"
+            )
+
+            if elapsed >= self.brake_hold_duration:
                 self.get_logger().info(
-                    "Deceleration complete. Returning home..."
+                    "Brake hold complete. Descending..."
                 )
-                self.state = "RETURN_HOME"
+                self.state = "DESCEND"
 
         elif self.state == "RETURN_HOME":
             dist = self.distance_to_target(
@@ -416,7 +652,7 @@ class HighSpeedVelocityMission(Node):
         elif self.state == "END":
             if not self.finished:
                 csv_path, summary_path = self.logger.finish()
-                self.get_logger().info("Circle mission finished.")
+                self.get_logger().info("High-speed mission finished.")
                 self.get_logger().info(f"CSV saved: {csv_path}")
                 self.get_logger().info(f"Summary saved: {summary_path}")
                 self.finished = True
@@ -424,11 +660,20 @@ class HighSpeedVelocityMission(Node):
             self.timer.cancel()
 
     def get_current_target(self):
+        if self.state == "BRAKE_HOLD":
+            return self.land_x, self.land_y, self.flight_altitude
+
         if self.state == "DESCEND":
+            if self.test_mode:
+                return self.land_x, self.land_y, -0.1
+
             return 0.0, 0.0, -0.1
 
         if self.state == "END":
             return self.current_x, self.current_y, self.current_z
+
+        if self.state == "STABILIZE":
+            return 0.0, 0.0, self.flight_altitude
 
         if self.state == "ACCELERATE":
             return 10.0, 0.0, self.flight_altitude
@@ -464,9 +709,11 @@ class HighSpeedVelocityMission(Node):
         msg.body_rate = False
 
         # Attitude-based transition flight
-        if self.state == "TRANSITION":
+        if self.state in [
+            "TRANSITION",
+            "TRANSITION_RECOVER",
+        ]:
             msg.attitude = True
-
         # High-speed velocity control + altitude position control
         elif self.state in [
             "ACCELERATE",
@@ -488,9 +735,24 @@ class HighSpeedVelocityMission(Node):
     def publish_position_setpoint(self, x, y, z):
         msg = TrajectorySetpoint()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.position = [float(x), float(y), float(z)]
-        msg.yaw = 0.0
+
+        msg.position = [
+            float(x),
+            float(y),
+            float(z),
+        ]
+
+        if self.state == "STABILIZE":
+            msg.yaw = 0.0
+
+        elif self.initial_yaw_rad is not None:
+            msg.yaw = float(self.initial_yaw_rad)
+
+        else:
+            msg.yaw = float("nan")
+
         self.trajectory_setpoint_pub.publish(msg)
+
 
 
     def publish_high_speed_setpoint(
@@ -528,7 +790,11 @@ class HighSpeedVelocityMission(Node):
         msg.yaw = float(yaw)
 
         self.trajectory_setpoint_pub.publish(msg)
-    def publish_transition_attitude_setpoint(self, pitch_deg):
+    def publish_transition_attitude_setpoint(
+        self,
+        pitch_deg,
+        base_thrust=None,
+    ):
         msg = VehicleAttitudeSetpoint()
 
         msg.timestamp = int(
@@ -546,8 +812,10 @@ class HighSpeedVelocityMission(Node):
         ]
 
         # Tilt compensation
-        cos_pitch = max(0.2, math.cos(abs(pitch_rad)))
-        thrust_mag = self.hover_thrust / cos_pitch
+        if base_thrust is None:
+            thrust_mag = self.transition_base_thrust
+        else:
+            thrust_mag = base_thrust
 
         # Altitude compensation (NED)
         altitude_error = self.current_z - self.flight_altitude

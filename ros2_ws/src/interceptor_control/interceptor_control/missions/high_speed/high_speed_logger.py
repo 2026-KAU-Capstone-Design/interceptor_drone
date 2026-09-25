@@ -94,6 +94,8 @@ class HighSpeedLogger:
             if row["state"] in [
                 "ACCELERATE",
                 "CRUISE",
+                "TRANSITION",
+                "TRANSITION_RECOVER",
                 "DECELERATE",
             ]
         ]
@@ -140,7 +142,13 @@ class HighSpeedLogger:
 
         state_speeds = {}
 
-        for state in ["ACCELERATE", "CRUISE", "DECELERATE"]:
+        for state in [
+            "ACCELERATE",
+            "CRUISE",
+            "TRANSITION",
+            "TRANSITION_RECOVER",
+            "DECELERATE",
+        ]:
             state_rows = [
                 row
                 for row in self.rows
