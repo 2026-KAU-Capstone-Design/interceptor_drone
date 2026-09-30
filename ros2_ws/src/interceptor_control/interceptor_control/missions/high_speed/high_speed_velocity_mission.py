@@ -14,6 +14,9 @@ from px4_msgs.msg import VehicleLocalPosition
 from px4_msgs.msg import VehicleStatus
 from px4_msgs.msg import VehicleAttitude
 from px4_msgs.msg import VehicleAttitudeSetpoint
+from px4_msgs.msg import VehicleThrustSetpoint
+from px4_msgs.msg import VehicleRatesSetpoint
+from px4_msgs.msg import VehicleAngularVelocity
 
 from interceptor_control.missions.high_speed.high_speed_logger import HighSpeedLogger
 
@@ -33,7 +36,17 @@ class HighSpeedVelocityMission(Node):
         # High-Speed Mission Parameters
         self.flight_altitude = -5.0
 
-        self.target_speed = 30.0
+        self.target_speed = 50.0
+
+        # Cruise entry condition
+        # CRUISE statistics begin only after the vehicle
+        # is actually close to the 50 m/s target.
+        self.accel_ramp_time = 6.0
+        self.cruise_entry_speed = 49.8
+        self.cruise_entry_hold_time = 2.0
+        self.accel_timeout = 25.0
+        self.cruise_ready_start_time = None
+
         # Transition Flight Parameters
         self.transition_pitch_deg = -50.0
         self.hover_thrust = 0.60
@@ -106,6 +119,17 @@ class HighSpeedVelocityMission(Node):
         self.current_yaw = 0.0
         self.initial_yaw_rad = None
 
+        # PX4 controller thrust setpoint logging
+        self.thrust_sp_x = 0.0
+        self.thrust_sp_y = 0.0
+        self.thrust_sp_z = 0.0
+        self.thrust_sp_norm = 0.0
+
+        # Controller tracking diagnostics
+        self.pitch_sp_deg = 0.0
+        self.pitch_rate_sp = 0.0
+        self.pitch_rate_actual = 0.0
+
         self.state = "INIT"
 
         workspace_path = (
@@ -167,6 +191,34 @@ class HighSpeedVelocityMission(Node):
             qos_profile,
         )
 
+        self.vehicle_thrust_setpoint_subscriber = self.create_subscription(
+            VehicleThrustSetpoint,
+            "/fmu/out/vehicle_thrust_setpoint",
+            self.vehicle_thrust_setpoint_callback,
+            qos_profile,
+        )
+
+        self.vehicle_attitude_setpoint_subscriber = self.create_subscription(
+            VehicleAttitudeSetpoint,
+            "/fmu/out/vehicle_attitude_setpoint",
+            self.vehicle_attitude_setpoint_callback,
+            qos_profile,
+        )
+
+        self.vehicle_rates_setpoint_subscriber = self.create_subscription(
+            VehicleRatesSetpoint,
+            "/fmu/out/vehicle_rates_setpoint",
+            self.vehicle_rates_setpoint_callback,
+            qos_profile,
+        )
+
+        self.vehicle_angular_velocity_subscriber = self.create_subscription(
+            VehicleAngularVelocity,
+            "/fmu/out/vehicle_angular_velocity",
+            self.vehicle_angular_velocity_callback,
+            qos_profile,
+        )
+
         self.timer = self.create_timer(0.05, self.timer_callback)
 
         self.get_logger().info("High-Speed Velocity Mission Node Started")
@@ -212,6 +264,43 @@ class HighSpeedVelocityMission(Node):
         if self.initial_yaw_rad is None:
             self.initial_yaw_rad = yaw_rad
 
+    def vehicle_thrust_setpoint_callback(self, msg):
+        self.thrust_sp_x = float(msg.xyz[0])
+        self.thrust_sp_y = float(msg.xyz[1])
+        self.thrust_sp_z = float(msg.xyz[2])
+
+        self.thrust_sp_norm = math.sqrt(
+            self.thrust_sp_x ** 2
+            + self.thrust_sp_y ** 2
+            + self.thrust_sp_z ** 2
+        )
+
+    def vehicle_attitude_setpoint_callback(self, msg):
+        # Desired attitude quaternion (w, x, y, z)
+        q = msg.q_d
+
+        w = q[0]
+        x = q[1]
+        y = q[2]
+        z = q[3]
+
+        sinp = 2.0 * (w * y - z * x)
+
+        if abs(sinp) >= 1.0:
+            self.pitch_sp_deg = math.degrees(
+                math.copysign(math.pi / 2.0, sinp)
+            )
+        else:
+            self.pitch_sp_deg = math.degrees(math.asin(sinp))
+
+    def vehicle_rates_setpoint_callback(self, msg):
+        # PX4 body pitch-rate setpoint [rad/s]
+        self.pitch_rate_sp = float(msg.pitch)
+
+    def vehicle_angular_velocity_callback(self, msg):
+        # Actual body pitch rate q [rad/s]
+        self.pitch_rate_actual = float(msg.xyz[1])
+
     def vehicle_status_callback(self, msg):
         pass
 
@@ -236,6 +325,14 @@ class HighSpeedVelocityMission(Node):
             self.current_roll,
             self.current_pitch,
             self.current_yaw,
+            self.thrust_sp_x,
+            self.thrust_sp_y,
+            self.thrust_sp_z,
+            self.thrust_sp_norm,
+            self.pitch_sp_deg,
+            self.current_pitch,
+            self.pitch_rate_sp,
+            self.pitch_rate_actual,
         )
 
         if self.state != "END":
@@ -325,15 +422,13 @@ class HighSpeedVelocityMission(Node):
 
                     commanded_vx = min(
                         self.target_speed,
-                        self.target_speed * elapsed / 6.0,
+                        self.target_speed * elapsed / self.accel_ramp_time,
                     )
 
                 elif self.state == "CRUISE":
+                    # Velocity Controller only:
+                    # PX4 determines required acceleration / pitch / thrust
                     commanded_vx = self.target_speed
-
-                    # Forward acceleration feed-forward
-                    # to increase forward thrust / pitch
-                    commanded_ax = self.transition_accel_ff
 
                 elif self.state == "DECELERATE":
                     elapsed = (
@@ -524,28 +619,84 @@ class HighSpeedVelocityMission(Node):
                 self.stabilize_ok_start_time = None
 
         elif self.state == "ACCELERATE":
+            now = self.get_clock().now()
+
             elapsed = (
-                self.get_clock().now() - self.high_speed_start_time
+                now - self.high_speed_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 6.0:
-                self.get_logger().info("Acceleration complete. Cruising...")
-                self.cruise_start_time = self.get_clock().now()
-                self.state = "CRUISE"
+            speed_xy = math.hypot(
+                self.current_vx,
+                self.current_vy,
+            )
+
+            # First 6 s:
+            # velocity setpoint ramps from 0 -> 50 m/s.
+            #
+            # After 6 s:
+            # continue commanding 50 m/s until the actual
+            # speed reaches the cruise-entry threshold.
+            if (
+                elapsed >= self.accel_ramp_time
+                and speed_xy >= self.cruise_entry_speed
+            ):
+                if self.cruise_ready_start_time is None:
+                    self.cruise_ready_start_time = now
+
+                    self.get_logger().info(
+                        f"Near target speed: {speed_xy:.2f} m/s. "
+                        f"Holding >= {self.cruise_entry_speed:.1f} m/s "
+                        f"for {self.cruise_entry_hold_time:.1f} s..."
+                    )
+
+                ready_elapsed = (
+                    now - self.cruise_ready_start_time
+                ).nanoseconds / 1e9
+
+                if ready_elapsed >= self.cruise_entry_hold_time:
+                    self.get_logger().info(
+                        f"Cruise-entry speed stabilized: "
+                        f"{speed_xy:.2f} m/s. Starting CRUISE..."
+                    )
+
+                    self.cruise_start_time = now
+                    self.state = "CRUISE"
+
+            else:
+                # Continuous 2 s condition:
+                # reset timer whenever speed drops below threshold.
+                self.cruise_ready_start_time = None
+
+            # If 50 m/s-class flight cannot be reached,
+            # do not include the acceleration period in CRUISE statistics.
+            if (
+                self.state == "ACCELERATE"
+                and elapsed >= self.accel_timeout
+            ):
+                self.get_logger().warning(
+                    f"Cruise-entry timeout: "
+                    f"required >= {self.cruise_entry_speed:.1f} m/s, "
+                    f"actual={speed_xy:.2f} m/s. "
+                    "Skipping CRUISE and decelerating."
+                )
+
+                self.decel_start_vy = self.current_vy
+                self.decel_start_time = now
+                self.state = "DECELERATE"
 
         elif self.state == "CRUISE":
             elapsed = (
                 self.get_clock().now() - self.cruise_start_time
             ).nanoseconds / 1e9
 
-            if elapsed >= 8.0:
+            if elapsed >= 20.0:
                 self.get_logger().info(
-                    "Cruise complete. Starting attitude transition..."
+                    "Velocity-only high-speed hold complete. Decelerating..."
                 )
-                self.pre_transition_pitch_deg = self.current_pitch
 
-                self.transition_start_time = self.get_clock().now()
-                self.state = "TRANSITION"
+                self.decel_start_vy = self.current_vy
+                self.decel_start_time = self.get_clock().now()
+                self.state = "DECELERATE"
 
         elif self.state == "TRANSITION":
             elapsed = (

@@ -26,6 +26,14 @@ class HighSpeedLogger:
         "roll",
         "pitch",
         "yaw",
+        "thrust_sp_x",
+        "thrust_sp_y",
+        "thrust_sp_z",
+        "thrust_sp_norm",
+        "pitch_sp_deg",
+        "pitch_actual_deg",
+        "pitch_rate_sp",
+        "pitch_rate_actual",
     ]
 
     def __init__(self, workspace_path):
@@ -56,6 +64,14 @@ class HighSpeedLogger:
         roll,
         pitch,
         yaw,
+        thrust_sp_x,
+        thrust_sp_y,
+        thrust_sp_z,
+        thrust_sp_norm,
+        pitch_sp_deg,
+        pitch_actual_deg,
+        pitch_rate_sp,
+        pitch_rate_actual,
     ):
         speed_xy = math.sqrt(vx**2 + vy**2)
         speed_3d = math.sqrt(vx**2 + vy**2 + vz**2)
@@ -77,6 +93,14 @@ class HighSpeedLogger:
             "roll": roll,
             "pitch": pitch,
             "yaw": yaw,
+            "thrust_sp_x": thrust_sp_x,
+            "thrust_sp_y": thrust_sp_y,
+            "thrust_sp_z": thrust_sp_z,
+            "thrust_sp_norm": thrust_sp_norm,
+            "pitch_sp_deg": pitch_sp_deg,
+            "pitch_actual_deg": pitch_actual_deg,
+            "pitch_rate_sp": pitch_rate_sp,
+            "pitch_rate_actual": pitch_rate_actual,
         }
 
         self.rows.append(row)
