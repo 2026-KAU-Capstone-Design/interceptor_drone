@@ -68,6 +68,9 @@ class RocketTrackLogger:
             "forward_speed",
             "vx",
             "vy",
+            "roll_actual_deg",
+            "pitch_actual_deg",
+            "yaw_actual_deg",
         ]
 
         self.csv_file = open(
@@ -103,6 +106,9 @@ class RocketTrackLogger:
         forward_speed=0.0,
         vx=0.0,
         vy=0.0,
+        roll_actual=0.0,
+        pitch_actual=0.0,
+        yaw_actual=None,
     ):
 
         if self.start_time is None:
@@ -128,6 +134,11 @@ class RocketTrackLogger:
             "forward_speed": forward_speed,
             "vx": vx,
             "vy": vy,
+            "roll_actual_deg": math.degrees(roll_actual),
+            "pitch_actual_deg": math.degrees(pitch_actual),
+            "yaw_actual_deg": math.degrees(
+                current_yaw if yaw_actual is None else yaw_actual
+            ),
         }
 
         self.rows.append(row)

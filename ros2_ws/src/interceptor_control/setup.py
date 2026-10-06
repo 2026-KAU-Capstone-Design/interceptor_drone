@@ -34,6 +34,7 @@ setup(
 	    'transition_1_mission = interceptor_control.missions.transition.transition_1_mission:main',
         'transition_2_mission = interceptor_control.missions.transition.transition_2.transition_2_mission:main',      
         'rocket_track_mission = interceptor_control.missions.tracking.rocket_track_mission:main',
+        'moving_target_follow_mission = interceptor_control.missions.tracking.moving_target_follow_mission:main',
         ],
     },
 )
