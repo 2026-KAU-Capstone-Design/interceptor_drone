@@ -9,10 +9,11 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32, Float32MultiArray
 from ultralytics import YOLO
+from interceptor_interfaces.msg import TargetDetection
 
 
 class YoloLiveDetector(Node):
@@ -24,6 +25,7 @@ class YoloLiveDetector(Node):
         self.conf = args.conf
         self.show = args.show
         self.frame_skip = args.frame_skip
+        self.target_class = args.target_class
 
         # Filtering parameters
         self.min_red_ratio = args.min_red_ratio
@@ -64,14 +66,21 @@ class YoloLiveDetector(Node):
         self.miss_count = 0
         self.reset_after_misses = args.reset_after_misses
 
+        rgb_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+
         self.sub = self.create_subscription(
             Image,
             self.topic,
             self.image_callback,
-            qos_profile_sensor_data,
+            rgb_qos,
         )
 
         self.bbox_pub = self.create_publisher(Float32MultiArray, "/target/balloon_bbox", 10)
+        self.detection_pub = self.create_publisher(TargetDetection, "/target/detection", 10)
         self.lock_pub = self.create_publisher(Bool, "/target/lock_on", 10)
         self.distance_pub = self.create_publisher(Float32, "/target/distance_m", 10)
         self.near_pub = self.create_publisher(Bool, "/target/near_2m", 10)
@@ -254,16 +263,92 @@ class YoloLiveDetector(Node):
         return float(distance_m)
 
     def image_callback(self, msg: Image):
+        # 콜백 시작 간격 및 전체 실행 시간 진단
+        diag_start = time.perf_counter()
+        prev_start = getattr(self, "_diag_prev_start", None)
+        self._diag_prev_start = diag_start
+
+        try:
+            return self._image_callback_impl(msg)
+        finally:
+            diag_end = time.perf_counter()
+            total_ms = (diag_end - diag_start) * 1000.0
+
+            if prev_start is not None:
+                interval_ms = (diag_start - prev_start) * 1000.0
+            else:
+                interval_ms = -1.0
+
+            self._diag_callback_count = (
+                getattr(self, "_diag_callback_count", 0) + 1
+            )
+
+            self._diag_total_sum = (
+                getattr(self, "_diag_total_sum", 0.0) + total_ms
+            )
+
+            if interval_ms >= 0.0:
+                self._diag_interval_sum = (
+                    getattr(self, "_diag_interval_sum", 0.0)
+                    + interval_ms
+                )
+                self._diag_interval_count = (
+                    getattr(self, "_diag_interval_count", 0) + 1
+                )
+
+            last_log = getattr(self, "_diag_last_log", diag_start)
+
+            if diag_end - last_log >= 2.0:
+                n = self._diag_callback_count
+                interval_n = getattr(
+                    self, "_diag_interval_count", 0
+                )
+
+                avg_total = self._diag_total_sum / max(n, 1)
+                avg_interval = (
+                    getattr(self, "_diag_interval_sum", 0.0)
+                    / max(interval_n, 1)
+                )
+
+                self.get_logger().info(
+                    f"CALLBACK_STATS "
+                    f"count={n} "
+                    f"CALLBACK_INTERVAL_MS={avg_interval:.2f} "
+                    f"CALLBACK_TOTAL_MS={avg_total:.2f} "
+                    f"CALLBACK_MAX_MS="
+                    f"{getattr(self, '_diag_max_total', 0.0):.2f}"
+                )
+
+                self._diag_callback_count = 0
+                self._diag_total_sum = 0.0
+                self._diag_interval_sum = 0.0
+                self._diag_interval_count = 0
+                self._diag_max_total = 0.0
+                self._diag_last_log = diag_end
+            else:
+                self._diag_last_log = last_log
+
+            self._diag_max_total = max(
+                getattr(self, "_diag_max_total", 0.0),
+                total_ms,
+            )
+
+    def _image_callback_impl(self, msg: Image):
         self.frame_count += 1
 
         if self.frame_count % self.frame_skip != 0:
             return
+
+        # RGB 변환 및 YOLO 추론 처리 시간 측정
+        diag_t0 = time.perf_counter()
 
         try:
             frame = self.ros_image_to_bgr(msg)
         except Exception as e:
             self.get_logger().warn(f"image conversion failed: {e}")
             return
+
+        diag_t1 = time.perf_counter()
 
         image_h, image_w = frame.shape[:2]
         image_cx = image_w / 2.0
@@ -277,6 +362,16 @@ class YoloLiveDetector(Node):
             device=0,
         )
 
+        diag_t2 = time.perf_counter()
+
+        self.get_logger().info(
+            f"YOLO_TIMING "
+            f"RGB_CONVERT_MS={(diag_t1 - diag_t0) * 1000:.2f} "
+            f"YOLO_PREDICT_MS={(diag_t2 - diag_t1) * 1000:.2f} "
+            f"PREPROCESS_INFER_MS={(diag_t2 - diag_t0) * 1000:.2f}",
+            throttle_duration_sec=1.0,
+        )
+
         result = results[0]
         boxes = result.boxes
 
@@ -285,6 +380,11 @@ class YoloLiveDetector(Node):
         if boxes is not None and len(boxes) > 0:
             for box in boxes:
                 cls_id = int(box.cls[0].item())
+
+                # 실행 시 지정한 표적 클래스만 선택
+                if self.target_class != -1 and cls_id != self.target_class:
+                    continue
+
                 class_name = self.model.names.get(cls_id, str(cls_id))
                 conf = float(box.conf[0].item())
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
@@ -346,6 +446,15 @@ class YoloLiveDetector(Node):
                 self.reset_tracking_state()
 
             self.publish_no_detection(image_w, image_h)
+
+            # 원본 RGB 촬영 시각을 포함한 검출 실패 메시지
+            detection = TargetDetection()
+            detection.header = msg.header
+            detection.detected = False
+            detection.confidence = 0.0
+            detection.class_id = -1
+            self.detection_pub.publish(detection)
+
             lock_on = self.update_lock_on(False, 9999.0, 9999.0)
             self.publish_lock(lock_on)
             self.publish_distance(-1.0)
@@ -374,8 +483,16 @@ class YoloLiveDetector(Node):
         lock_on = self.update_lock_on(True, dx, dy)
 
         smoothed_box_w = max(1.0, sx2 - sx1)
-        distance_m = self.estimate_distance_m(smoothed_box_w, image_w)
-        near_2m = 0.0 < distance_m <= self.near_distance_m
+
+        # 풍선(class 0)에만 실제 크기 기반 거리 추정 적용
+        if best["cls_id"] == 0:
+            distance_m = self.estimate_distance_m(smoothed_box_w, image_w)
+            near_2m = 0.0 < distance_m <= self.near_distance_m
+
+        # 고정익(class 1)은 풍선 크기로 거리 추정하지 않음
+        else:
+            distance_m = -1.0
+            near_2m = False
 
         self.publish_bbox(
             detected=1.0,
@@ -393,10 +510,24 @@ class YoloLiveDetector(Node):
             red_ratio=best["red_ratio"],
             distance_m=distance_m,
             near_2m=1.0 if near_2m else 0.0,
+            class_id=best["cls_id"],
+            lock_on=1.0 if lock_on else 0.0,
         )
         self.publish_lock(lock_on)
         self.publish_distance(distance_m)
         self.publish_near(near_2m)
+
+        # 원본 RGB 영상의 촬영 시각을 보존한 검출 결과
+        detection = TargetDetection()
+        detection.header = msg.header
+        detection.detected = True
+        detection.confidence = float(best["conf"])
+        detection.class_id = int(best["cls_id"])
+        detection.x1 = float(sx1)
+        detection.y1 = float(sy1)
+        detection.x2 = float(sx2)
+        detection.y2 = float(sy2)
+        self.detection_pub.publish(detection)
 
         self.get_logger().info(
             f"bbox conf={best['conf']:.3f} red={best['red_ratio']:.3f} "
@@ -500,6 +631,8 @@ class YoloLiveDetector(Node):
         red_ratio,
         distance_m,
         near_2m,
+        class_id,
+        lock_on,
     ):
         msg = Float32MultiArray()
         msg.data = [
@@ -518,6 +651,8 @@ class YoloLiveDetector(Node):
             float(red_ratio),
             float(distance_m),
             float(near_2m),
+            float(class_id),  # [15] class_id
+            float(lock_on),   # [16] lock_on
         ]
         self.bbox_pub.publish(msg)
 
@@ -539,6 +674,8 @@ class YoloLiveDetector(Node):
             0.0,  # red_ratio
             -1.0,  # distance_m, unavailable
             0.0,   # near_2m
+            -1.0,  # class_id, no detection
+            0.0,   # lock_on, no detection
         ]
         self.bbox_pub.publish(msg)
 
@@ -565,6 +702,13 @@ def main():
     parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--frame-skip", type=int, default=1)
+    parser.add_argument(
+        "--target-class",
+        type=int,
+        choices=[-1, 0, 1],
+        default=0,
+        help="-1: all classes, 0: balloon, 1: fixed_wing_uav",
+    )
 
     # Filtering options
     parser.add_argument("--min-red-ratio", type=float, default=0.08)
