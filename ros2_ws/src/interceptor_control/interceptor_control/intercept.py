@@ -129,6 +129,18 @@ class InterceptNode(Node):
 
         # ── 파라미터 ──
         self.declare_parameter('target_altitude', -5.0)
+
+        # 실행 전에 표적 종류를 선택
+        # balloon: 실제 풍선 / BBox 거리 추정
+        # fixed_wing: 시뮬레이션 고정익 / Depth 거리 측정
+        self.declare_parameter('target_mode', 'balloon')
+        self.declare_parameter('control_mode', 'yaw_only')
+
+        # 기본값은 비행 비활성화
+        # 명시적으로 허용한 경우에만 ARM 및 이륙 가능
+        self.declare_parameter('enable_flight', False)
+
+        # 기존 파라미터는 호환성을 위해 유지
         self.declare_parameter('expected_target_class', 0)
         self.declare_parameter('v_approach', 1.5)
         self.declare_parameter('v_intercept', 4.0)
@@ -143,9 +155,67 @@ class InterceptNode(Node):
         self.declare_parameter('position_threshold', 0.5)
 
         self.target_alt = self.get_parameter('target_altitude').value
-        self.expected_target_class = int(
-            self.get_parameter('expected_target_class').value
+
+        # 실행 전에 선택한 표적 모드
+        self.target_mode = str(
+            self.get_parameter('target_mode').value
+        ).strip().lower()
+
+        # 모드별 설정
+        TARGET_MODES = {
+            'balloon': {
+                'class_id': 0,
+                'distance_source': 'bbox',
+            },
+            'fixed_wing': {
+                'class_id': 1,
+                'distance_source': 'depth',
+            },
+        }
+
+        # 지원하지 않는 모드는 실행하지 않음
+        if self.target_mode not in TARGET_MODES:
+            raise ValueError(
+                f'지원하지 않는 target_mode: {self.target_mode}. '
+                'balloon 또는 fixed_wing을 선택해야 합니다.'
+            )
+
+        # 선택한 모드에 따라 클래스와 거리 추정 방식 결정
+        mode_config = TARGET_MODES[self.target_mode]
+
+        self.expected_target_class = mode_config['class_id']
+        self.distance_source = mode_config['distance_source']
+
+        self.control_mode = str(
+            self.get_parameter('control_mode').value
+        ).strip().lower()
+
+        if self.control_mode not in ('yaw_only', 'full_mission'):
+            raise ValueError(
+                f'지원하지 않는 control_mode: {self.control_mode}'
+            )
+
+        # 비행 활성화 여부
+        self.enable_flight = bool(
+            self.get_parameter('enable_flight').value
         )
+
+        self.get_logger().info(
+            f'target_mode={self.target_mode}, '
+            f'control_mode={self.control_mode}, '
+            f'enable_flight={self.enable_flight}'
+        )
+
+        self.get_logger().info(
+            f'Target mode: {self.target_mode} | '
+            f'class_id={self.expected_target_class} | '
+            f'distance_source={self.distance_source}'
+        )
+
+        # 고정익 Yaw 시험에서는 낮은 SITL 시험 고도 사용
+        if self.target_mode == 'fixed_wing' and self.control_mode == 'yaw_only':
+            self.target_alt = -1.5  # PX4 NED: 음수는 상승
+
         self.v_approach = self.get_parameter('v_approach').value
         self.v_intercept = self.get_parameter('v_intercept').value
         self.Kp_yaw = self.get_parameter('Kp_yaw').value
@@ -184,9 +254,30 @@ class InterceptNode(Node):
         )
 
         # ── 인식 Subscribers ──
-        # 인식 정보는 하나의 bbox 메시지에서 수신
-        self.create_subscription(
-            Float32MultiArray, '/target/balloon_bbox', self._cb_bbox, 10)
+        if self.target_mode == 'balloon':
+            # 실기체: 기존 BBox 기반 거리 추정 결과 사용
+            self.create_subscription(
+                Float32MultiArray,
+                '/target/balloon_bbox',
+                self._cb_bbox,
+                10
+            )
+
+        elif self.target_mode == 'fixed_wing':
+            # SITL: YOLO 검출 정보와 Depth 거리 정보 사용
+            self.create_subscription(
+                TargetDetection,
+                '/target/detection',
+                self._cb_target_detection,
+                10
+            )
+
+            self.create_subscription(
+                TargetDistance,
+                '/target/distance_stamped',
+                self._cb_target_distance,
+                10
+            )
 
         # ── 비행 상태 ──
         self.state = FlightState.IDLE
@@ -227,6 +318,23 @@ class InterceptNode(Node):
         self.last_bbox_time = None
         self.detection_timeout_sec = 0.5
 
+        # ── 고정익 모드: YOLO–Depth 데이터 동기화 ──
+
+        # 같은 촬영 시각을 가진 YOLO·Depth 메시지를 임시 보관
+        self.target_pairs = OrderedDict()
+
+        # 유효한 데이터 쌍을 마지막으로 수신한 시각
+        self.last_target_pair_time = None
+
+        # 영상 촬영 시각 기준 최대 허용 지연: 0.15초
+        self.target_data_age_limit_ns = 150_000_000
+
+        # 유효한 데이터가 0.3초 이상 없으면 표적 정보 무효화
+        self.target_pair_timeout_sec = 0.30
+
+        # 동기화된 데이터만 제어에 사용하기 위한 상태
+        self.target_pair_valid = False
+
         # ── 자세/풍속 ──
         self.yaw_rad = 0.0
         self.tilt_deg = 0.0
@@ -245,6 +353,96 @@ class InterceptNode(Node):
     # =========================================================================
     # 인식 콜백
     # =========================================================================
+    
+    # ── 고정익: YOLO + Depth 동기화 콜백 ──
+
+    def _cb_target_detection(self, msg: TargetDetection):
+        self._store_target_pair('detection', msg)
+
+    def _cb_target_distance(self, msg: TargetDistance):
+        self._store_target_pair('distance', msg)
+
+    def _store_target_pair(self, kind, msg):
+        # ROS Header의 촬영 시각을 나노초로 변환
+        stamp = msg.header.stamp
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+
+        if stamp_ns <= 0:
+            return
+
+        # 같은 촬영 시각을 가진 메시지를 하나로 묶음
+        entry = self.target_pairs.setdefault(stamp_ns, {})
+        entry[kind] = msg
+
+        # 아직 두 메시지가 모두 도착하지 않았다면 대기
+        if 'detection' not in entry or 'distance' not in entry:
+            while len(self.target_pairs) > 30:
+                self.target_pairs.popitem(last=False)
+            return
+
+        detection = entry['detection']
+        distance = entry['distance']
+        self.target_pairs.pop(stamp_ns, None)
+
+        # 현재 ROS 시간과 촬영 시각 차이
+        now_ns = self.get_clock().now().nanoseconds
+        age_ns = now_ns - stamp_ns
+
+        box = (
+            detection.x1,
+            detection.y1,
+            detection.x2,
+            detection.y2,
+        )
+
+        # YOLO 클래스, 거리값, 동기화 상태 검사
+        valid = (
+            detection.detected
+            and detection.class_id == self.expected_target_class
+            and distance.valid
+            and detection.header.frame_id == distance.header.frame_id
+            and 0 <= age_ns <= self.target_data_age_limit_ns
+            and math.isfinite(distance.distance_m)
+            and 0.3 < distance.distance_m < 20.0
+            and math.isfinite(distance.sync_diff_ms)
+            and abs(distance.sync_diff_ms) <= 20.0
+            and all(math.isfinite(v) for v in box)
+            and 0 <= detection.x1 < detection.x2 <= 1280
+            and 0 <= detection.y1 < detection.y2 <= 960
+        )
+
+        if not valid:
+            self.target_pair_valid = False
+            self.detected = False
+            self.lock_on = False
+            self.distance_m = -1.0
+            self.last_bbox_time = None
+            return
+
+        # 유효한 데이터만 기존 IBVS 변수에 반영
+        self.image_w = 1280.0
+        self.image_h = 960.0
+
+        self.bbox_dx = (
+            (detection.x1 + detection.x2) / 2.0
+            - self.image_w / 2.0
+        )
+        self.bbox_dy = (
+            (detection.y1 + detection.y2) / 2.0
+            - self.image_h / 2.0
+        )
+
+        self.detected = True
+        self.target_class_id = detection.class_id
+        self.distance_m = float(distance.distance_m)
+        self.near_2m = self.distance_m <= 2.0
+
+        # 아직 자동 접근을 허용하지 않음
+        self.lock_on = False
+
+        self.target_pair_valid = True
+        self.last_target_pair_time = self.get_clock().now()
+        self.last_bbox_time = self.last_target_pair_time
 
     def _cb_bbox(self, msg: Float32MultiArray):
         d = msg.data
@@ -347,12 +545,44 @@ class InterceptNode(Node):
         return 0.0 <= elapsed <= self.detection_timeout_sec
 
     def _has_valid_detection(self) -> bool:
-        """최근 검출된 표적이 기대하는 클래스와 일치하는지 확인한다."""
-        return (
+        """표적 모드에 따라 최신 검출 데이터의 유효성을 확인한다."""
+
+        # 모든 모드에 공통으로 적용하는 조건
+        basic_valid = (
             self._is_detection_fresh()
             and self.detected
             and self.target_class_id == self.expected_target_class
         )
+
+        if not basic_valid:
+            return False
+
+        # 풍선 모드: 기존 BBox 기반 검출 및 거리 추정 사용
+        if self.target_mode == 'balloon':
+            return (
+                math.isfinite(self.distance_m)
+                and self.distance_m > 0.0
+            )
+
+        # 고정익 모드: 동기화된 YOLO + Depth 데이터만 사용
+        if self.target_mode == 'fixed_wing':
+            if not self.target_pair_valid:
+                return False
+
+            if self.last_target_pair_time is None:
+                return False
+
+            elapsed = (
+                self.get_clock().now() - self.last_target_pair_time
+            ).nanoseconds / 1e9
+
+            return (
+                0.0 <= elapsed <= self.target_pair_timeout_sec
+                and math.isfinite(self.distance_m)
+                and 0.3 < self.distance_m < 20.0
+            )
+
+        return False
 
     # =========================================================================
     # PX4 콜백
@@ -757,18 +987,29 @@ class InterceptNode(Node):
 
     def _compute_velocity_cmd(self, v_forward: float):
         """
-        이미지 오차 → NED 속도 명령 변환
+        이미지 중심 오차 → NED 속도 명령 변환
 
-        ex: 정규화 가로 오차 [-1, 1] (양수 = 풍선이 오른쪽)
-        ey: 정규화 세로 오차 [-1, 1] (양수 = 풍선이 아래쪽)
+        yaw_only:
+            Yaw 정렬만 수행
+            전진속도 = 0
+            수직속도 = 0
 
-        yaw_rate: 양수 = 시계 방향 (NED 기준)
-        vz: 양수 = 하강 (NED 기준)
-        vx, vy: 현재 기수(yaw) 방향 전진
+        full_mission:
+            기존 IBVS 이동 제어 유지
         """
+
+        # 이미지 중심 기준 정규화 오차
         ex = self.bbox_dx / (self.image_w / 2.0)
         ey = self.bbox_dy / (self.image_h / 2.0)
 
+        if self.control_mode == 'yaw_only':
+            # 기존 SITL 시험에서 검증한 Yaw 제어 설정
+            yaw_rate = float(np.clip(0.4 * ex, -0.15, 0.15))
+
+            # Yaw 이외 이동 명령 차단
+            return 0.0, 0.0, 0.0, yaw_rate
+
+        # 기존 full_mission IBVS 알고리즘
         yaw_rate = float(np.clip(self.Kp_yaw * ex, -1.0, 1.0))
         vz = float(np.clip(self.Kp_vz * ey, -2.0, 2.0))
 
@@ -782,6 +1023,11 @@ class InterceptNode(Node):
     # =========================================================================
 
     def _control_loop(self):
+        # ── 비행 활성화 안전장치 ──
+        # 기본값 False: PX4 제어 명령을 발행하지 않음
+        if not self.enable_flight:
+            return
+
         # 종료 상태에서는 새로운 Offboard 명령을 발행하지 않음
         if self.state == FlightState.DONE:
             return
@@ -861,8 +1107,21 @@ class InterceptNode(Node):
                 self.get_logger().info(
                     f'→ TRACK (풍선 발견 dx={self.bbox_dx:.0f} dy={self.bbox_dy:.0f}px)')
             else:
-                # 제자리에서 천천히 yaw 회전
-                self._publish_velocity_sp(yawspeed=self.search_yaw_rate)
+                # 표적을 찾기 위한 제자리 Yaw 탐색
+                if self.control_mode == 'yaw_only':
+                    search_rate = float(
+                        np.clip(self.search_yaw_rate, -0.15, 0.15)
+                    )
+                else:
+                    search_rate = self.search_yaw_rate
+
+                # 전진 및 수직 이동 없이 회전
+                self._publish_velocity_sp(
+                    vx=0.0,
+                    vy=0.0,
+                    vz=0.0,
+                    yawspeed=search_rate
+                )
 
         elif self.state == FlightState.TRACK:
             if not self._check_wind_safety():
@@ -888,6 +1147,24 @@ class InterceptNode(Node):
                 return
 
             self.miss_count = 0
+
+            # ── Yaw 전용 시험 ──
+            if self.control_mode == 'yaw_only':
+                # 기존 IBVS 계산 함수를 사용하되,
+                # 전진 및 수직 이동을 차단하고 Yaw만 제어
+                vx, vy, vz, yaw_rate = self._compute_velocity_cmd(0.0)
+
+                self._publish_velocity_sp(vx, vy, vz, yaw_rate)
+
+                self.get_logger().info(
+                    f'[TRACK/YAW_ONLY] '
+                    f'target={self.target_mode} '
+                    f'dist={self.distance_m:.2f}m '
+                    f'dx={self.bbox_dx:.0f}px '
+                    f'vx={vx:.2f} vy={vy:.2f} vz={vz:.2f} '
+                    f'yaw={yaw_rate:.3f}rad/s'
+                )
+                return
 
             # lock_on = YOLO 10프레임 확신(7/10) + 중앙 오차 100px 이내
             # → 표적 확인 + 중앙 정렬 동시 달성 시 True
@@ -1266,36 +1543,51 @@ class YawClosedLoopSITL(Node):
 
 
 def main():
-    """SITL yaw-only observe by default. Legacy mission must be explicit."""
-    parser = argparse.ArgumentParser(description='Interceptor controller (SITL test gated)')
-    modes = parser.add_mutually_exclusive_group()
-    modes.add_argument('--yaw-only', action='store_true', help='Use validated SITL yaw controller (default)')
-    modes.add_argument('--legacy-mission', action='store_true', help='Use original interception mission; NOT verified for new sensor topics')
-    parser.add_argument('--enable-flight', action='store_true', help='EXPLICIT FLIGHT CONSENT: SITL ONLY')
+    """통합 IBVS 제어기 실행. 기본값은 비행 비활성화."""
+
+    parser = argparse.ArgumentParser(
+        description='Unified IBVS Interceptor Controller'
+    )
+
+    # 기존 Yaw 시험 제어기는 비교 및 백업용으로 유지
+    parser.add_argument(
+        '--old-yaw-test',
+        action='store_true',
+        help='이전 YawClosedLoopSITL 제어기 실행'
+    )
+
     args, ros_args = parser.parse_known_args()
-    if args.legacy_mission and not args.enable_flight:
-        parser.error('--legacy-mission requires --enable-flight (old mission auto-arms/takes off)')
+
     rclpy.init(args=ros_args)
     node = None
+
     try:
-        if args.legacy_mission:
-            # Retained unmodified for backward compatibility. NOT integrated with stamped YOLO/Depth.
-            node = InterceptNode()
-            node.get_logger().warning('LEGACY MISSION: AUTO ARM/TAKEOFF ENABLED; NOT VALIDATED WITH NEW SENSOR TOPICS')
+        if args.old_yaw_test:
+            # 기존 검증된 Yaw 제어기: 관측 전용으로 실행
+            node = YawClosedLoopSITL(enable_flight=False)
         else:
-            node = YawClosedLoopSITL(enable_flight=args.enable_flight)
-            if args.enable_flight and not bool(node.get_parameter('use_sim_time').value):
-                raise RuntimeError('Yaw flight test requires ROS use_sim_time:=true (Gazebo SITL only)')
+            # 새 통합 제어기
+            node = InterceptNode()
+
         rclpy.spin(node)
+
     except KeyboardInterrupt:
-        if isinstance(node, YawClosedLoopSITL):
-            if node.enable_flight and node.state in ('TAKEOFF', 'YAW_CONTROL'):
+        if isinstance(node, InterceptNode):
+            # 비행 비활성화 상태에서는 PX4 명령을 보내지 않음
+            if node.enable_flight:
+                node.get_logger().warning(
+                    'Ctrl+C: 비행 종료 요청'
+                )
+                node.land()
+                time.sleep(0.25)
+
+        elif isinstance(node, YawClosedLoopSITL):
+            if node.enable_flight and node.state in (
+                'TAKEOFF', 'YAW_CONTROL'
+            ):
                 node.request_land('Ctrl+C')
                 time.sleep(0.25)
-        elif isinstance(node, InterceptNode):
-            node.get_logger().warning('Ctrl+C: legacy mission LAND requested')
-            node.land()
-            time.sleep(0.25)
+
     finally:
         if node is not None:
             node.destroy_node()
