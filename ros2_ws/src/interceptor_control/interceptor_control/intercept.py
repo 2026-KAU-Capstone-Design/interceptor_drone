@@ -338,10 +338,20 @@ class InterceptNode(Node):
         # ── 자세/풍속 ──
         self.yaw_rad = 0.0
         self.tilt_deg = 0.0
+
+        # PX4 Odometry 최신성 검사
+        self.last_odometry_time = None
+        self.odometry_timeout_sec = 0.5
+
         self.wind_speed_est = None  # 실제 풍속 정보 없음 (미측정)
         self.attitude_disturbed_since = None
 
         self.timer = self.create_timer(0.1, self._control_loop)
+
+        # 비행 비활성화 상태에서 센서 입력 확인용 로그
+        self.observe_timer = self.create_timer(
+            1.0, self._observe_target
+        )
 
         self.get_logger().info('=== Mission 3: Balloon Intercept ===')
         self.get_logger().info(f'  이륙 고도    : {abs(self.target_alt):.1f}m')
@@ -443,6 +453,26 @@ class InterceptNode(Node):
         self.target_pair_valid = True
         self.last_target_pair_time = self.get_clock().now()
         self.last_bbox_time = self.last_target_pair_time
+
+    def _observe_target(self):
+        # 비행 중에는 관측 로그를 출력하지 않음
+        if self.enable_flight:
+            return
+
+        # 현재 수신한 정보의 유효성 확인
+        valid = self._has_valid_detection()
+
+        self.get_logger().info(
+            f'[OBSERVE] '
+            f'mode={self.target_mode} '
+            f'valid={valid} '
+            f'class={self.target_class_id} '
+            f'dx={self.bbox_dx:.1f}px '
+            f'dy={self.bbox_dy:.1f}px '
+            f'dist={self.distance_m:.2f}m '
+            f'near_2m={self.near_2m} '
+            f'lock_on={self.lock_on}'
+        )
 
     def _cb_bbox(self, msg: Float32MultiArray):
         d = msg.data
@@ -710,6 +740,27 @@ class InterceptNode(Node):
 
         return 0.0 <= elapsed_sec <= timeout_sec
 
+    def _is_odometry_fresh(self) -> bool:
+        """PX4 Odometry가 최근에 정상 수신되었는지 확인."""
+
+        # 아직 정상 Odometry를 한 번도 받지 않은 경우
+        if self.last_odometry_time is None:
+            return False
+
+        # 마지막 수신 이후 경과 시간 계산
+        elapsed_sec = (
+            self.get_clock().now() - self.last_odometry_time
+        ).nanoseconds / 1e9
+
+        # 시간이 역행했거나 허용 시간을 초과한 경우
+        if elapsed_sec < 0:
+            return False
+
+        if elapsed_sec >= self.odometry_timeout_sec:
+            return False
+
+        return True
+
     def _is_vehicle_status_lost(self) -> bool:
         """한 번 이상 수신했던 PX4 상태 정보가 오래되었는지 확인."""
 
@@ -815,19 +866,44 @@ class InterceptNode(Node):
 
     def _cb_odometry(self, msg):
         q = msg.q  # [w, x, y, z]
+
+        # 쿼터니언 데이터가 부족하면 무시
         if len(q) < 4:
             return
 
-        siny = 2.0 * (q[0] * q[3] + q[1] * q[2])
-        cosy = 1.0 - 2.0 * (q[2] ** 2 + q[3] ** 2)
+        # NaN 또는 무한대 값이 있으면 무시
+        if not all(math.isfinite(float(v)) for v in q[:4]):
+            return
+
+        # 크기가 0에 가까운 잘못된 쿼터니언은 무시
+        norm = math.sqrt(sum(float(v) ** 2 for v in q[:4]))
+        if norm < 1e-6:
+            return
+
+        # 쿼터니언 정규화
+        w, x, y, z = (float(v) / norm for v in q[:4])
+
+        siny = 2.0 * (w * z + x * y)
+        cosy = 1.0 - 2.0 * (y ** 2 + z ** 2)
         self.yaw_rad = float(math.atan2(siny, cosy))
 
-        sinr = 2.0 * (q[0] * q[1] + q[2] * q[3])
-        cosr = 1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2)
+        # 정상 Odometry 수신 시각 저장
+        self.last_odometry_time = self.get_clock().now()
+
+        # Roll 계산 (정규화된 쿼터니언 사용)
+        sinr = 2.0 * (w * x + y * z)
+        cosr = 1.0 - 2.0 * (x ** 2 + y ** 2)
         roll = math.atan2(sinr, cosr)
-        sinp = max(-1.0, min(1.0, 2.0 * (q[0] * q[2] - q[3] * q[1])))
+
+        # Pitch 계산 (정규화된 쿼터니언 사용)
+        sinp = 2.0 * (w * y - z * x)
+        sinp = max(-1.0, min(1.0, sinp))
         pitch = math.asin(sinp)
-        self.tilt_deg = float(math.degrees(math.sqrt(roll ** 2 + pitch ** 2)))
+
+        # 기울기 계산 및 기존 안전 검사 유지
+        self.tilt_deg = float(
+            math.degrees(math.sqrt(roll ** 2 + pitch ** 2))
+        )
         self._check_attitude_safety()
 
     # =========================================================================
@@ -1101,6 +1177,11 @@ class InterceptNode(Node):
                 self._publish_velocity_sp()
                 return
 
+            # PX4 자세 정보가 오래되면 탐색 회전 명령 차단
+            if not self._is_odometry_fresh():
+                self._publish_velocity_sp()
+                return
+
             if self._has_valid_detection():
                 self.miss_count = 0
                 self.state = FlightState.TRACK
@@ -1127,8 +1208,13 @@ class InterceptNode(Node):
             if not self._check_wind_safety():
                 return
 
-            # PX4 상태 정보가 유효하지 않으면 새로운 추적 이동 명령 차단
+            # PX4 상태 정보가 오래되면 이동 명령 차단
             if not self._is_vehicle_status_fresh():
+                self._publish_velocity_sp()
+                return
+
+            # PX4 위치·자세 정보가 오래되면 이동 명령 차단
+            if not self._is_odometry_fresh():
                 self._publish_velocity_sp()
                 return
 
@@ -1195,8 +1281,13 @@ class InterceptNode(Node):
                 f'vfwd={v_fwd:.1f} yaw={yaw_rate:.2f}')
 
         elif self.state == FlightState.INTERCEPT:
-            # PX4 상태 정보가 유효하지 않으면 요격 이동 명령 차단
+            # PX4 상태 정보가 오래되면 새로운 이동 명령 차단
             if not self._is_vehicle_status_fresh():
+                self._publish_velocity_sp()
+                return
+
+            # PX4 Odometry가 오래되면 새로운 이동 명령 차단
+            if not self._is_odometry_fresh():
                 self._publish_velocity_sp()
                 return
 
