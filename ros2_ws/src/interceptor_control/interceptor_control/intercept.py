@@ -139,6 +139,9 @@ class InterceptNode(Node):
         # 기본값은 비행 비활성화
         # 명시적으로 허용한 경우에만 ARM 및 이륙 가능
         self.declare_parameter('enable_flight', False)
+        self.declare_parameter('sitl_hover_test', False)
+        self.declare_parameter('sitl_hover_sec', 8.0)
+        self.declare_parameter('sitl_takeoff_timeout_sec', 30.0)
 
         # 기존 파라미터는 호환성을 위해 유지
         self.declare_parameter('expected_target_class', 0)
@@ -199,6 +202,19 @@ class InterceptNode(Node):
         self.enable_flight = bool(
             self.get_parameter('enable_flight').value
         )
+
+        self.sitl_hover_test = bool(
+            self.get_parameter('sitl_hover_test').value
+        )
+        self.sitl_hover_sec = max(
+            1.0, float(self.get_parameter('sitl_hover_sec').value)
+        )
+        self.sitl_takeoff_timeout_sec = max(
+            5.0, float(self.get_parameter('sitl_takeoff_timeout_sec').value)
+        )
+        self.sitl_takeoff_t0 = None
+        self.sitl_hover_t0 = None
+        self.sitl_flight_confirmed = False
 
         self.get_logger().info(
             f'target_mode={self.target_mode}, '
@@ -283,7 +299,12 @@ class InterceptNode(Node):
         self.state = FlightState.IDLE
         self.local_pos = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
+
+        self.last_local_pos_time = None
         self.last_vehicle_status_time = None
+
+        # PX4 위치 정보 최대 허용 수신 간격
+        self.local_position_timeout_sec = 0.5
 
         # PX4 상태 메시지 수신 중단 감지 기준
         self.vehicle_status_loss_timeout_sec = 1.5
@@ -618,9 +639,45 @@ class InterceptNode(Node):
     # PX4 콜백
     # =========================================================================
 
+    def _is_local_position_ready(self) -> bool:
+        """PX4 위치 정보가 최신이며 자동 이륙에 사용 가능한지 확인."""
+
+        if self.last_local_pos_time is None:
+            return False
+
+        elapsed_sec = (
+            self.get_clock().now() - self.last_local_pos_time
+        ).nanoseconds / 1e9
+
+        if not (0.0 <= elapsed_sec < self.local_position_timeout_sec):
+            return False
+
+        pos = self.local_pos
+
+        # 위치 및 방향 추정 유효성 확인
+        # 수평 위치와 고도 추정은 항상 유효해야 함
+        if not (pos.xy_valid and pos.z_valid):
+            return False
+
+        # 일반 임무에서는 최종 Heading 정렬을 필수로 요구
+        # SITL 호버링 시험에서는 이륙 전 정렬 미완료 상태를 허용
+        if not self.sitl_hover_test:
+            if not pos.heading_good_for_control:
+                return False
+
+        # 위치값이 비정상적인 숫자인지 확인
+        if not all(
+            math.isfinite(float(v))
+            for v in (pos.x, pos.y, pos.z)
+        ):
+            return False
+
+        return True
+
     def _cb_local_pos(self, msg):
         """PX4 위치 및 지면 기준 속도 정보를 저장한다."""
         self.local_pos = msg
+        self.last_local_pos_time = self.get_clock().now()
 
         # msg.vx, msg.vy는 기체의 지면 기준 속도이며
         # 실제 풍속이 아니므로 wind_speed_est에 대입하지 않는다.
@@ -1139,34 +1196,159 @@ class InterceptNode(Node):
 
         elif self.state == FlightState.PREFLIGHT:
             self._publish_position_sp(z=self.target_alt)
+
+            # 비행 상태, 위치 추정, 자세 정보가 모두 준비되어야 진행
+            if not (
+                self._is_vehicle_status_fresh()
+                and self._is_local_position_ready()
+                and self._is_odometry_fresh()
+            ):
+                self.setpoint_counter = 0
+                return
+
             self.setpoint_counter += 1
-            if self.setpoint_counter >= 50:  # 5초 사전 전송 (EKF2 수렴 대기)
+
+            # 준비 조건을 연속 5초간 만족하면 ARM 단계로 이동
+            if self.setpoint_counter >= 50:
                 self.state = FlightState.ARMING
-                self.get_logger().info('→ ARMING')
+                self.get_logger().info(
+                    '→ ARMING (PX4 상태·위치·자세 확인 완료)'
+                )
+
 
         elif self.state == FlightState.ARMING:
-            self._publish_position_sp(z=self.target_alt)
+            # 이륙 시작 지점의 수평 좌표 저장
+            self.takeoff_xy = [
+                float(self.local_pos.x),
+                float(self.local_pos.y)
+            ]
+            self.setpoint_counter = 0
+
+            # 현재 수평 위치를 유지하며 목표 고도 지정
+            self._publish_position_sp(
+                x=self.takeoff_xy[0],
+                y=self.takeoff_xy[1],
+                z=self.target_alt
+            )
+
             self.engage_offboard()
             self.arm()
-            self.takeoff_xy = [self.local_pos.x, self.local_pos.y]
+
+            if self.sitl_hover_test:
+                self.sitl_takeoff_t0 = time.monotonic()
+                self.sitl_hover_t0 = None
+                self.sitl_flight_confirmed = False
+
             self.state = FlightState.TAKEOFF
-            self.get_logger().info(f'→ TAKEOFF (목표 {abs(self.target_alt):.1f}m)')
+            self.get_logger().info(
+                '→ TAKEOFF (ARM/Offboard 확인 대기, '
+                f'목표 {abs(self.target_alt):.1f}m)'
+            )
 
         elif self.state == FlightState.TAKEOFF:
-            self._publish_position_sp(z=self.target_alt)
-            # arming_state=1이면 ARM 안 된 것 → 재시도
-            if self.vehicle_status.arming_state != 2:
-                self.setpoint_counter += 1
-                if self.setpoint_counter % 50 == 0:  # 5초마다 재시도
-                    self.engage_offboard()
-                    self.arm()
-                    self.get_logger().warn(
-                        f'[TAKEOFF] ARM 미확인 (arming_state={self.vehicle_status.arming_state}) — 재시도')
+            # 이륙 지점의 X, Y 좌표를 계속 유지
+            self._publish_position_sp(
+                x=self.takeoff_xy[0],
+                y=self.takeoff_xy[1],
+                z=self.target_alt
+            )
+
+            # 최신 PX4 상태 정보가 없으면 판단 보류
+            if not self._is_vehicle_status_fresh():
                 return
-            if abs(self.local_pos.z - self.target_alt) < self.pos_threshold:
+
+            armed = (
+                self.vehicle_status.arming_state
+                == VehicleStatus.ARMING_STATE_ARMED
+            )
+
+            offboard_active = (
+                self.vehicle_status.nav_state
+                == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+            )
+
+            if self.sitl_hover_test:
+                now = time.monotonic()
+
+                if armed and offboard_active:
+                    self.sitl_flight_confirmed = True
+                elif self.sitl_flight_confirmed:
+                    self.get_logger().error(
+                        '[SITL] ARM/Offboard 상태 이탈: '
+                        'Offboard 명령 중단, PX4 상태 확인 필요'
+                    )
+                    self.state = FlightState.DONE
+                    return
+
+                if (
+                    self.sitl_hover_t0 is None
+                    and self.sitl_takeoff_t0 is not None
+                    and now - self.sitl_takeoff_t0
+                    >= self.sitl_takeoff_timeout_sec
+                ):
+                    if armed and offboard_active:
+                        self.state = FlightState.RTL
+                        self.get_logger().warning(
+                            '[SITL] 이륙 시간 초과 → RTL 요청 예정'
+                        )
+                    else:
+                        self.state = FlightState.DONE
+                        self.get_logger().error(
+                            '[SITL] 이륙 준비 시간 초과: '
+                            '명령 중단, QGC에서 상태 확인'
+                        )
+                    return
+
+            # ARM과 Offboard 모두 확인되어야 이륙 진행
+            if not (armed and offboard_active):
+                self.setpoint_counter += 1
+
+                # 기존 5초 간격 재시도 유지
+                if self.setpoint_counter % 50 == 0:
+                    if not offboard_active:
+                        self.engage_offboard()
+
+                    if not armed:
+                        self.arm()
+
+                    self.get_logger().warn(
+                        '[TAKEOFF] PX4 승인 대기 '
+                        f'(ARM={armed}, '
+                        f'Offboard={offboard_active})'
+                    )
+                return
+
+            # 위치 추정이 유효해야 고도 도달 판단
+            if not self._is_local_position_ready():
+                return
+
+            if self.sitl_hover_test:
+                if self.sitl_hover_t0 is None:
+                    if abs(
+                        self.local_pos.z - self.target_alt
+                    ) < self.pos_threshold:
+                        self.sitl_hover_t0 = time.monotonic()
+                        self.get_logger().info(
+                            '[SITL] 목표 고도 도달 → 위치 유지 시작'
+                        )
+                elif (
+                    time.monotonic() - self.sitl_hover_t0
+                    >= self.sitl_hover_sec
+                ):
+                    self.state = FlightState.RTL
+                    self.get_logger().info(
+                        '[SITL] 호버링 종료 → RTL 요청 예정'
+                    )
+                return
+
+            if abs(
+                self.local_pos.z - self.target_alt
+            ) < self.pos_threshold:
                 self.miss_count = 0
                 self.state = FlightState.SEARCH
-                self.get_logger().info('→ SEARCH (풍선 탐색 시작)')
+                self.get_logger().info(
+                    '→ SEARCH (목표 고도 도달, 풍선 탐색 시작)'
+                )
 
         elif self.state == FlightState.SEARCH:
             if not self._check_wind_safety():
@@ -1343,18 +1525,34 @@ class InterceptNode(Node):
                     '→ DONE (PX4 RTL 모드 전환 확인)'
                 )
 
+
             elif not self.handover_failed:
-                if self._is_pending_command_rejected():
-                    self.handover_failed = True
-                    self.get_logger().error(
-                        'RTL 명령 거부/실패: PX4 제어권 이양 미확인'
+                rtl_rejected = self._is_pending_command_rejected()
+                rtl_timeout = self._is_handover_timed_out()
+
+                if rtl_rejected or rtl_timeout:
+                    reason = (
+                        'RTL 명령 거부'
+                        if rtl_rejected
+                        else 'RTL 응답 시간 초과'
                     )
 
-                elif self._is_handover_timed_out():
-                    self.handover_failed = True
                     self.get_logger().error(
-                        'RTL 응답 시간 초과: PX4 제어권 이양 미확인'
+                        f'[SITL] {reason} → LAND 요청으로 전환'
                     )
+
+                    # 이전 RTL 요청의 대기 상태 초기화
+                    self.pending_command = None
+                    self.pending_command_sent_time = None
+                    self.last_command_ack = None
+                    self.last_command_ack_time = None
+
+                    # LANDING에서 새로운 착륙 명령을 보내도록 준비
+                    self.handover_command_sent = False
+                    self.handover_failed = False
+                    self.state = FlightState.LANDING
+                    return
+
 
         elif self.state == FlightState.LANDING:
             # PX4가 아직 OFFBOARD라면 제로 속도 목표 발행
