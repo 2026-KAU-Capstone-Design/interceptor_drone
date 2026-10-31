@@ -129,6 +129,8 @@ class InterceptNode(Node):
 
         # ── 파라미터 ──
         self.declare_parameter('target_altitude', -5.0)
+        self.declare_parameter('min_tracking_altitude', 2.0)
+        self.declare_parameter('max_tracking_altitude', 5.0)
 
         # 실행 전에 표적 종류를 선택
         # balloon: 실제 풍선 / BBox 거리 추정
@@ -160,6 +162,26 @@ class InterceptNode(Node):
         self.declare_parameter('position_threshold', 0.5)
 
         self.target_alt = self.get_parameter('target_altitude').value
+        self.min_tracking_alt = float(
+        self.get_parameter('min_tracking_altitude').value
+        )
+
+        self.max_tracking_alt = float(
+            self.get_parameter('max_tracking_altitude').value
+        )
+
+        if not (
+            math.isfinite(self.min_tracking_alt)
+            and math.isfinite(self.max_tracking_alt)
+            and 0.0 < self.min_tracking_alt < self.max_tracking_alt
+        ):
+            raise ValueError(
+                '고도 제한 설정 오류: '
+                '0 < min_tracking_altitude < max_tracking_altitude 필요'
+            )
+
+        # 이륙 위치의 NED 고도 기준값
+        self.takeoff_z = None
 
         # 실행 전에 선택한 표적 모드
         self.target_mode = str(
@@ -195,7 +217,11 @@ class InterceptNode(Node):
             self.get_parameter('control_mode').value
         ).strip().lower()
 
-        if self.control_mode not in ('yaw_only', 'full_mission'):
+        if self.control_mode not in (
+            'yaw_only',
+            'yaw_altitude',
+            'full_mission',
+        ):
             raise ValueError(
                 f'지원하지 않는 control_mode: {self.control_mode}'
             )
@@ -1066,7 +1092,79 @@ class InterceptNode(Node):
         msg.timestamp = self._now_us()
         self.setpoint_pub.publish(msg)
 
+    def _limit_vertical_velocity(self, vz: float) -> float:
+        """
+        이륙 지점 기준 상대 고도를 이용해 수직 속도 제한.
+
+        NED 좌표계:
+          vz < 0 : 상승
+          vz > 0 : 하강
+
+        위치 정보가 유효하지 않으면 수직 이동을 차단.
+        """
+
+        # 아직 이륙 기준 고도가 저장되지 않은 경우
+        if self.takeoff_z is None:
+            return 0.0
+
+        # 위치 추정이 유효하지 않으면 수직 이동 금지
+        if not self._is_local_position_ready():
+            return 0.0
+
+        # 이륙 위치 기준 상대 고도 계산
+        current_alt = self.takeoff_z - float(self.local_pos.z)
+
+        # 비정상적인 고도값 차단
+        if not math.isfinite(current_alt):
+            return 0.0
+
+        # 경계 접근 시 감속하기 위한 여유 거리
+        margin = 0.5
+
+        # 경계를 넘는 방향의 속도 명령 차단
+        if vz < 0.0:
+            remaining = self.max_tracking_alt - current_alt
+
+            if remaining <= 0.0:
+                return 0.0
+
+            # 상한에 가까워질수록 상승 속도 감소
+            scale = min(1.0, remaining / margin)
+            return vz * scale
+
+        if vz > 0.0:
+            remaining = current_alt - self.min_tracking_alt
+
+            if remaining <= 0.0:
+                return 0.0
+
+            # 하한에 가까워질수록 하강 속도 감소
+            scale = min(1.0, remaining / margin)
+            return vz * scale
+
+        return 0.0
+
     def _publish_velocity_sp(self, vx=0.0, vy=0.0, vz=0.0, yawspeed=0.0):
+
+        # 풍선 탐색·추적·접근 중에만 고도 제한 적용
+        if self.state in (
+            FlightState.SEARCH,
+            FlightState.TRACK,
+            FlightState.INTERCEPT,
+        ):
+            requested_vz = float(vz)
+            vz = self._limit_vertical_velocity(requested_vz)
+
+            if (
+                self.control_mode == 'yaw_altitude'
+                and abs(requested_vz - vz) > 0.001
+            ):
+                self.get_logger().info(
+                    f'[ALT_LIMIT] requested_vz={requested_vz:.3f} '
+                    f'limited_vz={vz:.3f} '
+                    f'z={self.local_pos.z:.2f}'
+                )
+
         msg = TrajectorySetpoint()
         msg.position = [NAN, NAN, NAN]
         msg.velocity = [float(vx), float(vy), float(vz)]
@@ -1075,7 +1173,6 @@ class InterceptNode(Node):
         msg.yawspeed = float(yawspeed)
         msg.timestamp = self._now_us()
         self.setpoint_pub.publish(msg)
-
 
     def _send_command(self, command, param1=0.0, param2=0.0, param7=0.0):
         # RTL/LAND 요청만 종료 명령 대기 상태로 등록
@@ -1146,6 +1243,28 @@ class InterceptNode(Node):
 
             # Yaw 이외 이동 명령 차단
             return 0.0, 0.0, 0.0, yaw_rate
+
+        # ── Yaw + 고도 정렬 모드 ──
+        if self.control_mode == 'yaw_altitude':
+            # 수평 오차 → Yaw 속도
+            yaw_rate = float(np.clip(
+                0.4 * ex, -0.15, 0.15
+            ))
+
+            # 수직 오차 → NED 수직 속도
+            # dy < 0: 풍선이 화면 위쪽 → 상승(vz < 0)
+            # dy > 0: 풍선이 화면 아래쪽 → 하강(vz > 0)
+            vz = float(np.clip(
+                0.4 * ey, -0.3, 0.3
+            ))
+
+            # 화면 중심 근처에서는 불필요한 상하 이동 방지
+            vertical_deadband_px = 30.0
+            if abs(self.bbox_dy) <= vertical_deadband_px:
+                vz = 0.0
+
+            # 수평 이동 없이 Yaw 및 수직 정렬만 수행
+            return 0.0, 0.0, vz, yaw_rate
 
         # 기존 full_mission IBVS 알고리즘
         yaw_rate = float(np.clip(self.Kp_yaw * ex, -1.0, 1.0))
@@ -1235,13 +1354,16 @@ class InterceptNode(Node):
                     '→ ARMING (PX4 상태·위치·자세 확인 완료)'
                 )
 
-
         elif self.state == FlightState.ARMING:
             # 이륙 시작 지점의 수평 좌표 저장
             self.takeoff_xy = [
                 float(self.local_pos.x),
                 float(self.local_pos.y)
             ]
+
+            # 이륙 기준 고도 저장 (PX4 NED 좌표)
+            self.takeoff_z = float(self.local_pos.z)
+
             self.setpoint_counter = 0
 
             # 현재 수평 위치를 유지하며 목표 고도 지정
@@ -1445,8 +1567,23 @@ class InterceptNode(Node):
 
             self.miss_count = 0
 
-            # ── Yaw 전용 시험 ──
-            if self.control_mode == 'yaw_only':
+            # ── Yaw / Yaw + 고도 정렬 시험 ──
+            if self.control_mode in ('yaw_only', 'yaw_altitude'):
+                vx, vy, vz, yaw_rate = self._compute_velocity_cmd(0.0)
+
+                self._publish_velocity_sp(vx, vy, vz, yaw_rate)
+
+                self.get_logger().info(
+                    f'[TRACK/{self.control_mode.upper()}] '
+                    f'target={self.target_mode} '
+                    f'dist={self.distance_m:.2f}m '
+                    f'dx={self.bbox_dx:.0f}px '
+                    f'dy={self.bbox_dy:.0f}px '
+                    f'vx={vx:.2f} vy={vy:.2f} vz={vz:.2f} '
+                    f'yaw={yaw_rate:.3f}rad/s'
+                )
+                return
+
                 # 기존 IBVS 계산 함수를 사용하되,
                 # 전진 및 수직 이동을 차단하고 Yaw만 제어
                 vx, vy, vz, yaw_rate = self._compute_velocity_cmd(0.0)
