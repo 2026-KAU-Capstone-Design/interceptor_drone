@@ -142,6 +142,8 @@ class InterceptNode(Node):
         self.declare_parameter('sitl_hover_test', False)
         self.declare_parameter('sitl_hover_sec', 8.0)
         self.declare_parameter('sitl_takeoff_timeout_sec', 30.0)
+        self.declare_parameter('sitl_yaw_test', False)
+        self.declare_parameter('sitl_yaw_test_sec', 20.0)
 
         # 기존 파라미터는 호환성을 위해 유지
         self.declare_parameter('expected_target_class', 0)
@@ -215,6 +217,13 @@ class InterceptNode(Node):
         self.sitl_takeoff_t0 = None
         self.sitl_hover_t0 = None
         self.sitl_flight_confirmed = False
+        self.sitl_yaw_test = bool(
+        self.get_parameter('sitl_yaw_test').value
+        )
+        self.sitl_yaw_test_sec = max(
+            1.0, float(self.get_parameter('sitl_yaw_test_sec').value)
+        )
+        self.sitl_yaw_t0 = None
 
         self.get_logger().info(
             f'target_mode={self.target_mode}, '
@@ -639,6 +648,7 @@ class InterceptNode(Node):
     # PX4 콜백
     # =========================================================================
 
+
     def _is_local_position_ready(self) -> bool:
         """PX4 위치 정보가 최신이며 자동 이륙에 사용 가능한지 확인."""
 
@@ -654,25 +664,20 @@ class InterceptNode(Node):
 
         pos = self.local_pos
 
-        # 위치 및 방향 추정 유효성 확인
-        # 수평 위치와 고도 추정은 항상 유효해야 함
+        # 공통 위치 추정 검사 (SITL / 실기체 동일)
+        # 수평 위치와 고도 추정이 유효해야 함
         if not (pos.xy_valid and pos.z_valid):
             return False
 
-        # 일반 임무에서는 최종 Heading 정렬을 필수로 요구
-        # SITL 호버링 시험에서는 이륙 전 정렬 미완료 상태를 허용
-        if not self.sitl_hover_test:
-            if not pos.heading_good_for_control:
-                return False
-
-        # 위치값이 비정상적인 숫자인지 확인
+        # 위치와 Heading 값이 정상적인 숫자인지 확인
         if not all(
             math.isfinite(float(v))
-            for v in (pos.x, pos.y, pos.z)
+            for v in (pos.x, pos.y, pos.z, pos.heading)
         ):
             return False
 
         return True
+
 
     def _cb_local_pos(self, msg):
         """PX4 위치 및 지면 기준 속도 정보를 저장한다."""
@@ -1168,6 +1173,21 @@ class InterceptNode(Node):
         # PX4 상태 메시지 수신 중단 및 복구 감시
         self._monitor_vehicle_status()
 
+        # SITL Yaw 추적 시험 시간 제한
+        # 일반 임무에서는 적용하지 않음
+        if (
+            self.sitl_yaw_test
+            and self.sitl_yaw_t0 is not None
+            and self.state in (FlightState.SEARCH, FlightState.TRACK)
+            and time.monotonic() - self.sitl_yaw_t0
+                >= self.sitl_yaw_test_sec
+        ):
+            self.get_logger().info(
+                '[SITL/YAW] 시험 시간 종료 → RTL'
+            )
+            self.state = FlightState.RTL
+            self.handover_command_sent = False
+
         # 안전 대기 중 PX4가 RTL, LAND 또는 POSCTL 모드라면
         # 새로운 Offboard 제어 신호 및 속도 목표를 발행하지 않음
         if (
@@ -1234,7 +1254,7 @@ class InterceptNode(Node):
             self.engage_offboard()
             self.arm()
 
-            if self.sitl_hover_test:
+            if self.sitl_hover_test or self.sitl_yaw_test:
                 self.sitl_takeoff_t0 = time.monotonic()
                 self.sitl_hover_t0 = None
                 self.sitl_flight_confirmed = False
@@ -1267,7 +1287,7 @@ class InterceptNode(Node):
                 == VehicleStatus.NAVIGATION_STATE_OFFBOARD
             )
 
-            if self.sitl_hover_test:
+            if self.sitl_hover_test or self.sitl_yaw_test:
                 now = time.monotonic()
 
                 if armed and offboard_active:
@@ -1345,6 +1365,15 @@ class InterceptNode(Node):
                 self.local_pos.z - self.target_alt
             ) < self.pos_threshold:
                 self.miss_count = 0
+
+                # SITL Yaw 시험은 목표 고도 도달 시점부터 시간 측정
+                if self.sitl_yaw_test:
+                    self.sitl_yaw_t0 = time.monotonic()
+                    self.get_logger().info(
+                        f'[SITL/YAW] 추적 시험 시작 '
+                        f'({self.sitl_yaw_test_sec:.1f}초)'
+                    )
+
                 self.state = FlightState.SEARCH
                 self.get_logger().info(
                     '→ SEARCH (목표 고도 도달, 풍선 탐색 시작)'
