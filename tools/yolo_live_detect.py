@@ -53,6 +53,7 @@ class YoloLiveDetector(Node):
         # Distance estimation parameters
         self.balloon_diameter_m = args.balloon_diameter_m
         self.camera_hfov_rad = args.camera_hfov_rad
+        self.bbox_bias_px = args.bbox_bias_px
         self.near_distance_m = args.near_distance_m
 
         self.detect_history = deque(maxlen=self.lock_window)
@@ -254,11 +255,13 @@ class YoloLiveDetector(Node):
         return self.lock_on_state
 
     def estimate_distance_m(self, bbox_width_px, image_width_px):
-        if bbox_width_px <= 1:
+        corrected_width = bbox_width_px - self.bbox_bias_px
+
+        if not math.isfinite(corrected_width) or corrected_width <= 1.0:
             return -1.0
 
         fx = image_width_px / (2.0 * math.tan(self.camera_hfov_rad / 2.0))
-        distance_m = self.balloon_diameter_m * fx / bbox_width_px
+        distance_m = self.balloon_diameter_m * fx / corrected_width
 
         return float(distance_m)
 
@@ -738,6 +741,7 @@ def main():
         type=float,
         default=math.radians(87.0)
     )
+    parser.add_argument("--bbox-bias-px", type=float, default=0.0)
     parser.add_argument("--near-distance-m", type=float, default=2.0)
 
     args, _ = parser.parse_known_args()
