@@ -730,8 +730,14 @@ def main():
     parser.add_argument("--center-tolerance-off", type=float, default=180.0)
 
     # Distance estimation options
-    parser.add_argument("--balloon-diameter-m", type=float, default=1.0)
-    parser.add_argument("--camera-hfov-rad", type=float, default=1.74)
+    # ELP AR0234, 3.6mm lens, nominal horizontal FOV 87 degrees
+    # Balloon diameter: 0.9m
+    parser.add_argument("--balloon-diameter-m", type=float, default=0.9)
+    parser.add_argument(
+        "--camera-hfov-rad",
+        type=float,
+        default=math.radians(87.0)
+    )
     parser.add_argument("--near-distance-m", type=float, default=2.0)
 
     args, _ = parser.parse_known_args()
