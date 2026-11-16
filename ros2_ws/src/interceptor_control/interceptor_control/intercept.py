@@ -144,6 +144,14 @@ class InterceptNode(Node):
         self.declare_parameter('sitl_hover_test', False)
         self.declare_parameter('sitl_hover_sec', 8.0)
         self.declare_parameter('sitl_takeoff_timeout_sec', 30.0)
+        # SITL 저속 접근 시험
+        self.declare_parameter('sitl_approach_test', False)
+        self.declare_parameter('sitl_approach_sec', 30.0)
+        self.declare_parameter('sitl_approach_speed', 1.5)
+        self.declare_parameter('sitl_approach_max_travel', 1.0)
+        self.declare_parameter('sitl_approach_stop_dist', 3.0)
+
+        self.declare_parameter('intercept_dry_run', True)
         self.declare_parameter('sitl_yaw_test', False)
         self.declare_parameter('sitl_yaw_test_sec', 20.0)
 
@@ -249,6 +257,47 @@ class InterceptNode(Node):
         self.sitl_yaw_test_sec = max(
             1.0, float(self.get_parameter('sitl_yaw_test_sec').value)
         )
+        self.sitl_approach_test = bool(
+            self.get_parameter('sitl_approach_test').value
+        )
+        self.sitl_approach_sec = max(
+            1.0,
+            float(self.get_parameter('sitl_approach_sec').value)
+        )
+        self.sitl_approach_speed = max(
+            0.0,
+            min(
+                1.5,
+                float(
+                    self.get_parameter('sitl_approach_speed').value
+                )
+            )
+        )
+        self.sitl_approach_max_travel = max(
+            0.1,
+            min(
+                1.0,
+                float(
+                    self.get_parameter(
+                        'sitl_approach_max_travel'
+                    ).value
+                )
+            )
+        )
+        self.sitl_approach_stop_dist = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'sitl_approach_stop_dist'
+                ).value
+            )
+        )
+
+        self.sitl_approach_t0 = None
+        self.sitl_approach_start_xy = None
+        self.sitl_approach_started = False
+
+        self.intercept_dry_run = bool(self.get_parameter('intercept_dry_run').value)
         self.sitl_yaw_t0 = None
 
         self.get_logger().info(
@@ -719,7 +768,13 @@ class InterceptNode(Node):
         self.last_vehicle_status_time = self.get_clock().now()
 
     def _cb_command_ack(self, msg):
-        """PX4 명령 응답과 수신 시각 저장."""
+        """현재 대기 중인 RTL/LAND 명령의 ACK만 저장."""
+        if self.pending_command is None:
+            return
+
+        if msg.command != self.pending_command:
+            return
+
         self.last_command_ack = msg
         self.last_command_ack_time = self.get_clock().now()
 
@@ -1174,6 +1229,152 @@ class InterceptNode(Node):
         msg.timestamp = self._now_us()
         self.setpoint_pub.publish(msg)
 
+        # 실제 PX4에 발행한 속도 목표를 기록
+        self._record_ibvs_log(
+            msg.velocity[0],
+            msg.velocity[1],
+            msg.velocity[2],
+            msg.yawspeed,
+        )
+
+    def _record_ibvs_log(self, vx, vy, vz, yaw_rate):
+        """비행 중 실제 발행한 속도 명령을 CSV용으로 기록."""
+        if not self.enable_flight:
+            return
+
+        import time
+        from pathlib import Path
+
+        if not hasattr(self, "_ibvs_logger"):
+            from interceptor_control.ibvs_test_logger import IBVSTestLogger
+
+            repo_root = Path(__file__).resolve().parents[4]
+            result_dir = repo_root / "build" / "results" / "ibvs"
+
+            test_name = (
+                f"{self.target_mode}_{self.control_mode}"
+            )
+
+            self._ibvs_logger = IBVSTestLogger(
+                result_dir,
+                test_name,
+            )
+            self._ibvs_log_t0 = time.monotonic()
+            self._ibvs_log_saved = False
+
+            self.get_logger().info(
+                f"[IBVS/LOG] 기록 시작: {result_dir}"
+            )
+
+        state_name = getattr(
+            self.state, "name", str(self.state)
+        )
+
+        # PX4 VehicleLocalPosition의 위치/속도 추정값
+        pos = getattr(self, "local_pos", None)
+
+        def valid_value(field):
+            if pos is None:
+                return None
+            value = getattr(pos, field, None)
+            try:
+                value = float(value)
+                return value if math.isfinite(value) else None
+            except (TypeError, ValueError):
+                return None
+
+        actual_x = valid_value("x")
+        actual_y = valid_value("y")
+
+        track_travel = None
+        if self.state == FlightState.TRACK:
+            if actual_x is not None and actual_y is not None:
+                if not hasattr(self, "_ibvs_track_start_xy"):
+                    self._ibvs_track_start_xy = (actual_x, actual_y)
+
+                start_x, start_y = self._ibvs_track_start_xy
+                track_travel = math.hypot(
+                    actual_x - start_x,
+                    actual_y - start_y
+                )
+
+        self._ibvs_logger.add(
+            elapsed=time.monotonic() - self._ibvs_log_t0,
+            state=state_name,
+            dx=getattr(self, "bbox_dx", 0.0),
+            dy=getattr(self, "bbox_dy", 0.0),
+            distance=getattr(self, "distance_m", -1.0),
+            vx=vx,
+            vy=vy,
+            vz=vz,
+            yaw_rate=yaw_rate,
+            lock_on=getattr(self, "lock_on", False),
+            vx_actual=valid_value("vx"),
+            vy_actual=valid_value("vy"),
+            vz_actual=valid_value("vz"),
+            x=actual_x,
+            y=actual_y,
+            z=valid_value("z"),
+            track_travel=track_travel,
+        )
+
+    def _save_ibvs_log(self):
+        """수집한 비행 데이터를 한 번만 저장."""
+        logger = getattr(self, "_ibvs_logger", None)
+
+        if logger is None:
+            return
+
+        if getattr(self, "_ibvs_log_saved", False):
+            return
+
+        reason = (
+            "IBVS 제어 데이터 기록 완료. "
+            "표적 접촉 및 요격 성공은 별도 검증 필요."
+        )
+
+        if getattr(self, "sitl_approach_test", False):
+            end_reason = getattr(
+                self, "_ibvs_approach_end_reason", "NOT_RECORDED"
+            )
+            start_xy = getattr(
+                self, "sitl_approach_start_xy", None
+            )
+            end_xy = getattr(
+                self, "_ibvs_approach_end_xy", None
+            )
+
+            details = [
+                f"Approach end reason: {end_reason}",
+                f"Approach start XY (NED): {start_xy}",
+                f"Approach end XY (NED): {end_xy}",
+            ]
+
+            if start_xy is not None and end_xy is not None:
+                travel = math.hypot(
+                    end_xy[0] - start_xy[0],
+                    end_xy[1] - start_xy[1],
+                )
+                details.append(
+                    f"Approach end displacement: {travel:.3f} m"
+                )
+
+            reason += " | " + " | ".join(details)
+
+        csv_path, report_path = logger.save(
+            outcome="UNVERIFIED",
+            reason=reason,
+        )
+
+        self._ibvs_log_saved = True
+
+        self.get_logger().info(
+            f"[IBVS/LOG] CSV 저장: {csv_path}"
+        )
+        self.get_logger().info(
+            f"[IBVS/LOG] 보고서 저장: {report_path}"
+        )
+
     def _send_command(self, command, param1=0.0, param2=0.0, param7=0.0):
         # RTL/LAND 요청만 종료 명령 대기 상태로 등록
         if command in (
@@ -1266,9 +1467,24 @@ class InterceptNode(Node):
             # 수평 이동 없이 Yaw 및 수직 정렬만 수행
             return 0.0, 0.0, vz, yaw_rate
 
-        # 기존 full_mission IBVS 알고리즘
-        yaw_rate = float(np.clip(self.Kp_yaw * ex, -1.0, 1.0))
-        vz = float(np.clip(self.Kp_vz * ey, -2.0, 2.0))
+        # SITL 접근 시험: 검증된 2축 제어 제한 사용
+        if self.sitl_approach_test:
+            yaw_rate = float(
+                np.clip(0.4 * ex, -0.15, 0.15)
+            )
+            vz = float(
+                np.clip(0.4 * ey, -0.3, 0.3)
+            )
+            if abs(self.bbox_dy) <= 30.0:
+                vz = 0.0
+        else:
+            # 기존 full_mission IBVS 알고리즘
+            yaw_rate = float(
+                np.clip(self.Kp_yaw * ex, -1.0, 1.0)
+            )
+            vz = float(
+                np.clip(self.Kp_vz * ey, -2.0, 2.0)
+            )
 
         vx_ned = v_forward * math.cos(self.yaw_rad)
         vy_ned = v_forward * math.sin(self.yaw_rad)
@@ -1287,10 +1503,84 @@ class InterceptNode(Node):
 
         # 종료 상태에서는 새로운 Offboard 명령을 발행하지 않음
         if self.state == FlightState.DONE:
+            self._save_ibvs_log()
             return
 
         # PX4 상태 메시지 수신 중단 및 복구 감시
         self._monitor_vehicle_status()
+
+        # SITL 접근 시험: SEARCH/TRACK 공통 변위 감시
+        if (
+            self.sitl_approach_test
+            and self.sitl_approach_started
+            and self.state in (
+                FlightState.SEARCH,
+                FlightState.TRACK,
+            )
+        ):
+            # 위치 추정이 오래되면 접근을 지속하지 않음
+            if not self._is_odometry_fresh():
+                self._ibvs_approach_end_reason = "ODOMETRY_STALE"
+                self._ibvs_approach_end_xy = None
+                self.get_logger().warning(
+                    '[SITL/APPROACH_GUARD] 위치 추정 중단 → RTL'
+                )
+                self._publish_velocity_sp()
+                self.state = FlightState.RTL
+                self.handover_command_sent = False
+                return
+
+            if (
+                self.local_pos is not None
+                and self.sitl_approach_start_xy is not None
+            ):
+                sx, sy = self.sitl_approach_start_xy
+                cx = float(self.local_pos.x)
+                cy = float(self.local_pos.y)
+
+                travel = math.hypot(cx - sx, cy - sy)
+
+                if travel >= self.sitl_approach_max_travel:
+                    self._ibvs_approach_end_reason = "TRAVEL_LIMIT"
+                    self._ibvs_approach_end_xy = (cx, cy)
+
+                    self.get_logger().warning(
+                        '[SITL/APPROACH_GUARD] '
+                        f'접근 변위 {travel:.3f}m '
+                        f'>= 제한 {self.sitl_approach_max_travel:.3f}m '
+                        '→ RTL'
+                    )
+
+                    self._publish_velocity_sp()
+                    self.state = FlightState.RTL
+                    self.handover_command_sent = False
+                    return
+
+        # SITL 접근 시험: 시간 초과 시 RTL
+        if (
+            self.sitl_approach_test
+            and self.sitl_approach_t0 is not None
+            and self.state in (
+                FlightState.SEARCH,
+                FlightState.TRACK,
+                FlightState.INTERCEPT,
+            )
+            and (
+                time.monotonic() - self.sitl_approach_t0
+                >= self.sitl_approach_sec
+            )
+        ):
+            self._ibvs_approach_end_reason = "TIME_LIMIT"
+            self._ibvs_approach_end_xy = (
+                (float(self.local_pos.x), float(self.local_pos.y))
+                if self.local_pos is not None else None
+            )
+            self.get_logger().info(
+                '[SITL/APPROACH] 시간 종료 → RTL'
+            )
+            self._publish_velocity_sp()
+            self.state = FlightState.RTL
+            self.handover_command_sent = False
 
         # SITL Yaw 추적 시험 시간 제한
         # 일반 임무에서는 적용하지 않음
@@ -1496,6 +1786,15 @@ class InterceptNode(Node):
                         f'({self.sitl_yaw_test_sec:.1f}초)'
                     )
 
+                if self.sitl_approach_test:
+                    self.sitl_approach_t0 = time.monotonic()
+                    self.sitl_approach_start_xy = None
+                    self.sitl_approach_started = False
+                    self.get_logger().info(
+                        '[SITL/APPROACH] 접근 시험 시작 '
+                        f'({self.sitl_approach_sec:.1f}초)'
+                    )
+
                 self.state = FlightState.SEARCH
                 self.get_logger().info(
                     '→ SEARCH (목표 고도 도달, 풍선 탐색 시작)'
@@ -1571,6 +1870,31 @@ class InterceptNode(Node):
             if self.control_mode in ('yaw_only', 'yaw_altitude'):
                 vx, vy, vz, yaw_rate = self._compute_velocity_cmd(0.0)
 
+                # SITL Yaw 전용 시험: 영상 수직 정렬 대신 이륙 목표 고도 유지
+                if self.control_mode == 'yaw_only' and self.sitl_yaw_test:
+                    target_z = float(self.takeoff_z) + float(self.target_alt)
+                    current_z = float(self.local_pos.z)
+                    error_z = target_z - current_z
+
+                    if not math.isfinite(error_z):
+                        self._publish_velocity_sp()
+                        return
+
+                    vz = float(np.clip(
+                        0.4 * error_z, -0.2, 0.2
+                    ))
+
+                    if abs(error_z) < 0.08:
+                        vz = 0.0
+
+                    self.get_logger().info(
+                        f'[SITL/YAW_ALT_HOLD] '
+                        f'target_z={target_z:.2f} '
+                        f'current_z={current_z:.2f} '
+                        f'error_z={error_z:.2f} '
+                        f'vz={vz:.3f}'
+                    )
+
                 self._publish_velocity_sp(vx, vy, vz, yaw_rate)
 
                 self.get_logger().info(
@@ -1584,37 +1908,109 @@ class InterceptNode(Node):
                 )
                 return
 
-                # 기존 IBVS 계산 함수를 사용하되,
-                # 전진 및 수직 이동을 차단하고 Yaw만 제어
-                vx, vy, vz, yaw_rate = self._compute_velocity_cmd(0.0)
-
-                self._publish_velocity_sp(vx, vy, vz, yaw_rate)
-
-                self.get_logger().info(
-                    f'[TRACK/YAW_ONLY] '
-                    f'target={self.target_mode} '
-                    f'dist={self.distance_m:.2f}m '
-                    f'dx={self.bbox_dx:.0f}px '
-                    f'vx={vx:.2f} vy={vy:.2f} vz={vz:.2f} '
-                    f'yaw={yaw_rate:.3f}rad/s'
-                )
-                return
-
             # lock_on = YOLO 10프레임 확신(7/10) + 중앙 오차 100px 이내
             # → 표적 확인 + 중앙 정렬 동시 달성 시 True
 
             # 2m 이내 + lock_on → INTERCEPT 돌진
-            if self.near_2m and self.lock_on:
+            if (
+                not self.sitl_approach_test
+                and self.near_2m
+                and self.lock_on
+            ):
                 # 상태 전환 시 이전 접근 속도 명령을 갱신
                 self._publish_velocity_sp()
+                if self.intercept_dry_run:
+                    self._publish_velocity_sp()
+                    self.get_logger().warning(
+                        '[SITL/INTERCEPT] 진입 조건 충족 '
+                        '→ 전진 차단 → RTL (접촉 미확인)'
+                    )
+                    self.state = FlightState.RTL
+                    self.handover_command_sent = False
+                    return
+
                 self.state = FlightState.INTERCEPT
                 self.get_logger().info(
                     f'→ INTERCEPT (2m + lock_on err=({self.bbox_dx:.0f},{self.bbox_dy:.0f})px)')
                 return
 
+            # SITL 접근 시험 전용 종료 조건
+            if self.sitl_approach_test:
+                if self.sitl_approach_started:
+                    # 추적 시작 위치로부터 수평 이동 거리 계산
+                    if (
+                        self.sitl_approach_start_xy is not None
+                        and self.local_pos is not None
+                    ):
+                        sx, sy = self.sitl_approach_start_xy
+                        travel = math.hypot(
+                            self.local_pos.x - sx,
+                            self.local_pos.y - sy
+                        )
+
+                        if (
+                            travel
+                            >= self.sitl_approach_max_travel
+                        ):
+                            self.get_logger().info(
+                                '[SITL/APPROACH] '
+                                f'이동 거리 {travel:.2f}m '
+                                '→ RTL'
+                            )
+                            self._publish_velocity_sp()
+                            self.state = FlightState.RTL
+                            self.handover_command_sent = False
+                            return
+
+                # 추정 거리가 정지 기준 이내면 종료
+                if (
+                    self.distance_m > 0.0
+                    and self.distance_m
+                    <= self.sitl_approach_stop_dist
+                ):
+                    self._ibvs_approach_end_reason = "DISTANCE_ESTIMATE"
+                    self._ibvs_approach_end_xy = (
+                        (float(self.local_pos.x), float(self.local_pos.y))
+                        if self.local_pos is not None else None
+                    )
+                    self.get_logger().info(
+                        '[SITL/APPROACH] '
+                        f'추정 거리 {self.distance_m:.2f}m '
+                        '→ RTL'
+                    )
+                    self._publish_velocity_sp()
+                    self.state = FlightState.RTL
+                    self.handover_command_sent = False
+                    return
+
+                # 첫 접근 시점의 위치 저장
+                if (
+                    self.lock_on
+                    and not self.sitl_approach_started
+                ):
+                    if self.local_pos is None:
+                        self._publish_velocity_sp()
+                        return
+
+                    self.sitl_approach_start_xy = (
+                        self.local_pos.x,
+                        self.local_pos.y
+                    )
+                    self.sitl_approach_started = True
+
+                    self.get_logger().info(
+                        '[SITL/APPROACH] '
+                        '전진 접근 시작 '
+                        f'(최대 {self.sitl_approach_speed:.1f}m/s)'
+                    )
+
             # lock_on이면 전진 접근, 아니면 제자리에서 중앙 정렬만
             if self.lock_on:
-                v_fwd = self.v_approach
+                v_fwd = (
+                    self.sitl_approach_speed
+                    if self.sitl_approach_test
+                    else self.v_approach
+                )
                 phase = "접근"
             else:
                 v_fwd = 0.0
@@ -2044,9 +2440,18 @@ def main():
                 time.sleep(0.25)
 
     finally:
+        if isinstance(node, InterceptNode):
+            try:
+                node._save_ibvs_log()
+            except Exception as e:
+                node.get_logger().error(
+                    f"[IBVS/LOG] 저장 실패: {e}"
+                )
+
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
