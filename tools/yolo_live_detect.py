@@ -751,12 +751,27 @@ def main():
 
     try:
         rclpy.spin(node)
+    # YOLO_SHUTDOWN_FIX
+    except Exception as exc:
+        expected = (
+            type(exc).__name__ == 'ExternalShutdownException'
+            or (
+                type(exc).__name__ == 'RCLError'
+                and (
+                    'context is invalid' in str(exc)
+                    or 'already called' in str(exc)
+                )
+            )
+        )
+        if rclpy.ok() or not expected:
+            raise
+        print('STOPPED: YOLO ROS shutdown', flush=True)
     except KeyboardInterrupt:
         pass
     finally:
         cv2.destroyAllWindows()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":
