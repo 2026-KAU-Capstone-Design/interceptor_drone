@@ -67,6 +67,40 @@ class YoloLiveDetector(Node):
         self.miss_count = 0
         self.reset_after_misses = args.reset_after_misses
 
+        # Optional ground monitoring. Disabled by default; no effect on control.
+        self.monitor_state = None
+        self.monitor_sender = None
+        self.monitor_server = None
+        self.monitor_stats = None
+        self.monitor_error_reported = False
+        self.monitor_disabled = False
+        self.monitor_infer_times = deque(maxlen=30)
+        if args.monitor_dest:
+            try:
+                from jetson_monitor import (
+                    MonitorState, VideoSender, start_status_server,
+                    start_tegrastats,
+                )
+                self.monitor_state = MonitorState()
+                self.monitor_server = start_status_server(self.monitor_state)
+                self.monitor_stats = start_tegrastats(self.monitor_state)
+                self.monitor_sender = VideoSender(
+                    dest_ip=args.monitor_dest,
+                    state=self.monitor_state,
+                    fps=args.monitor_fps,
+                    bitrate_k=args.monitor_bitrate,
+                )
+                self.get_logger().info(
+                    f'Ground monitor enabled: udp://{args.monitor_dest}:5600, '
+                    'HTTP status on :8765'
+                )
+            except Exception as exc:
+                self.monitor_disabled = True
+                self.get_logger().error(
+                    f'Ground monitor unavailable (YOLO continues): {exc}'
+                )
+
+
         rgb_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=5,
@@ -97,6 +131,53 @@ class YoloLiveDetector(Node):
         self.get_logger().info("publishing: /target/lock_on")
         self.get_logger().info("publishing: /target/distance_m")
         self.get_logger().info("publishing: /target/near_2m")
+
+    def publish_monitor_frame(self, frame, count, label, inference_ms):
+        """Best-effort video/status path; isolate monitor errors from YOLO."""
+        if self.monitor_state is None or self.monitor_disabled:
+            return
+        try:
+            timestamp = time.monotonic()
+            self.monitor_infer_times.append(timestamp)
+            samples = self.monitor_infer_times
+            measured_fps = (
+                (len(samples) - 1) / (samples[-1] - samples[0])
+                if len(samples) >= 2 and samples[-1] > samples[0]
+                else 0.0
+            )
+            self.monitor_state.update_stats({'yolo_fps': round(measured_fps, 1)})
+            self.monitor_state.update_detection(
+                count=count, label=label, inference_ms=inference_ms
+            )
+            if self.monitor_sender is not None:
+                self.monitor_sender.send(frame)
+        except Exception as exc:
+            # Monitoring must never crash YOLO or change drone control messages.
+            self.monitor_disabled = True
+            if not self.monitor_error_reported:
+                self.monitor_error_reported = True
+                self.get_logger().error(
+                    f'Ground video monitor disabled after error: {exc}'
+                )
+
+    def close_monitor(self):
+        if self.monitor_sender is not None:
+            try:
+                self.monitor_sender.close()
+            except Exception as exc:
+                self.get_logger().warning(f'Monitor sender cleanup: {exc}')
+        if self.monitor_server is not None:
+            try:
+                self.monitor_server.shutdown()
+                self.monitor_server.server_close()
+            except Exception as exc:
+                self.get_logger().warning(f'Monitor HTTP cleanup: {exc}')
+        if self.monitor_stats is not None:
+            try:
+                self.monitor_stats.terminate()
+                self.monitor_stats.wait(timeout=2)
+            except Exception:
+                pass
 
     def ros_image_to_bgr(self, msg: Image):
         height = msg.height
@@ -463,6 +544,10 @@ class YoloLiveDetector(Node):
             self.publish_distance(-1.0)
             self.publish_near(False)
 
+            # Keep the original image visible even when the target was rejected.
+            self.publish_monitor_frame(
+                frame, 0, 'NO_VALID_TARGET', (diag_t2 - diag_t1) * 1000.0
+            )
             if self.show:
                 cv2.imshow("YOLOv8 Balloon Detection", frame)
                 cv2.waitKey(1)
@@ -613,6 +698,9 @@ class YoloLiveDetector(Node):
             self.fps_count = 0
             self.last_time = now
 
+        self.publish_monitor_frame(
+            annotated, 1, best["class_name"], (diag_t2 - diag_t1) * 1000.0
+        )
         if self.show:
             cv2.imshow("YOLOv8 Balloon Detection", annotated)
             cv2.waitKey(1)
@@ -704,6 +792,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--show", action="store_true")
+    # Optional local Wi-Fi video/health monitor (not a flight control channel)
+    parser.add_argument("--monitor-dest", default="", help="Ground laptop IPv4")
+    parser.add_argument("--monitor-fps", type=int, default=10)
+    parser.add_argument("--monitor-bitrate", type=int, default=1200)
     parser.add_argument("--frame-skip", type=int, default=1)
     parser.add_argument(
         "--target-class",
@@ -754,6 +846,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        node.close_monitor()
         cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
